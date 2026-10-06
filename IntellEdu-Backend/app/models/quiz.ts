@@ -1,0 +1,71 @@
+import { DateTime } from 'luxon'
+import { BaseModel, column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
+import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
+import Course from '#models/course'
+
+export class QuizQuestion extends BaseModel {
+  static table = 'quiz_questions'
+
+  @column({ isPrimary: true })
+  declare id: number
+
+  @column()
+  declare quizId: number
+
+  @column()
+  declare question: string
+
+  @column()
+  declare options: string[]
+
+  @column()
+  declare correctOption: number
+
+  @column()
+  declare explanation: string | null
+
+  @column()
+  declare sortOrder: number
+
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
+
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime
+}
+
+export default class Quiz extends BaseModel {
+  @column({ isPrimary: true })
+  declare id: number
+
+  @column()
+  declare courseId: number | null
+
+  @column()
+  declare title: string
+
+  @column()
+  declare description: string | null
+
+  @column()
+  declare xpReward: number
+
+  @column()
+  declare timeLimitMinutes: number
+
+  @column()
+  declare isPublished: boolean
+
+  @column.dateTime({ autoCreate: true })
+  declare createdAt: DateTime
+
+  @column.dateTime({ autoCreate: true, autoUpdate: true })
+  declare updatedAt: DateTime
+
+  @belongsTo(() => Course)
+  declare course: BelongsTo<typeof Course>
+
+  @hasMany(() => QuizQuestion, { foreignKey: 'quizId' })
+  declare questions: HasMany<typeof QuizQuestion>
+}
+
