@@ -10,7 +10,7 @@ import { defineConfig } from '@adonisjs/cors'
 */
 const corsConfig = defineConfig({
   enabled: true,
-  origin: true,                  // Allow all origins in dev; lock down in prod
+  origin: ['https://intell-edu.vercel.app', 'http://localhost:5173'],                  // Allow all origins in dev; lock down in prod
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
   headers: true,
   exposeHeaders: [],
