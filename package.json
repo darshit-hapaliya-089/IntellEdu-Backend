@@ -1,4 +1,9 @@
 {
+  "scripts": {
+    "dev": "node ace serve --watch",
+    "build": "node ace build",
+    "start": "node build/bin/server.js"
+  },
   "dependencies": {
     "@adonisjs/lucid": "^22.4.2",
     "mysql2": "^3.24.5",
