@@ -6,9 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node ace serve --hmr",
-    "build": "node ace build && node -e \"require('node:fs').cpSync('public', 'build/public', { recursive: true })\"",
-    "start": "node bin/server.js",
-    "test": "node ace test",
+    "build": "node ace build",
     "lint": "eslint . --ext=.ts",
     "format": "prettier --write .",
     "migration:run": "node ace migration:run",
