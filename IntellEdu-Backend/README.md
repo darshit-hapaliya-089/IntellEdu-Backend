@@ -24,8 +24,10 @@ Robust RESTful API backend for **IntellEdu** built with **AdonisJS v6**, **TypeS
   - User streak tracking with daily study ping and bonus XP
   - Comprehensive subject accuracy and quiz analytics
 - **AI Doubt Solver Proxy** (`/api/v1/doubts/*`)
-  - OpenAI / Gemini integration with intelligent pedagogical fallback tutor
+  - Gemini AI step-by-step explanations
   - Full doubt question & answer history tracking
+- **Firebase Authentication** for verified Google sign-in
+- **Email/SMS 6-digit OTP** with one-minute expiry and server-side verification (Gmail SMTP and Twilio)
 
 ---
 
@@ -43,9 +45,33 @@ Make sure PostgreSQL is running, then configure your connection in `.env`:
 DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_USER=postgres
-DB_PASSWORD=postgres
+DB_PASSWORD=your_postgres_password
 DB_DATABASE=intelledu
 ```
+
+Use the password for the PostgreSQL role configured in `DB_USER`. Put it in the
+backend repository's `.env` file (not `.env.example`), then restart the backend.
+`DB_USER` must be the PostgreSQL role name, and `DB_DATABASE` must match an
+existing database exactly (including capitalization). After connecting to the
+database, run `node ace migration:run`.
+
+Copy `.env.example` to `.env` and set `GEMINI_API_KEY` and `FIREBASE_API_KEY` from
+the corresponding provider projects. Configure the Twilio
+SMS sender and Gmail App Password for OTP delivery. Keep all provider credentials in
+the backend environment; do not put them in frontend source code.
+
+For phone OTP, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and the
+SMS-capable E.164 `TWILIO_FROM_NUMBER`. For email OTP, configure
+`SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, `SMTP_USER`, and `SMTP_PASS` using a
+Gmail App Password. These are separate delivery providers; both must be set up
+for users to choose either channel. On signup with both contacts entered, the user
+chooses one verification channel and only that contact is marked verified.
+
+In the separate frontend repository, copy `IntellEdu/.env.example` to
+`IntellEdu/.env.local` and fill in the Firebase Web app settings. Enable the Google
+provider in Firebase Authentication and authorize the frontend hostname in Firebase.
+Email and phone OTP are sent by the backend through Gmail SMTP and Twilio. Enable the
+Gemini Generative Language API in Google Cloud.
 
 ### 3. Run Migrations & Seed Database
 ```bash
@@ -71,6 +97,9 @@ The API will be live at `http://localhost:3333` (API base: `http://localhost:333
 |---|---|---|---|
 | `POST` | `/api/v1/auth/register` | Register new student | No |
 | `POST` | `/api/v1/auth/login` | Login & receive JWT | No |
+| `POST` | `/api/v1/auth/otp/send` | Send a six-digit signup/login code; expires after 60 seconds | No |
+| `POST` | `/api/v1/auth/otp/verify` | Verify the code and receive a JWT | No |
+| `POST` | `/api/v1/auth/firebase` | Verify Firebase Google/phone identity and issue JWT | No |
 | `GET` | `/api/v1/auth/me` | Current user profile | Yes |
 | `POST` | `/api/v1/auth/logout` | Invalidate token | Yes |
 | `GET` | `/api/v1/courses` | List all interactive courses | No |
@@ -87,3 +116,13 @@ The API will be live at `http://localhost:3333` (API base: `http://localhost:333
 | `POST` | `/api/v1/doubts/ask` | Ask AI Doubt Solver | Yes |
 | `GET` | `/api/v1/doubts/history` | User's doubt history | Yes |
 
+### XP, AI access, course resources, and friends boards
+
+- `GET /api/v1/doubts/status` returns `{ xpBalance, xpCostPerQuestion, trialActive, trialDay, trialStartedAt, trialExpiresAt, trialDaysRemaining }`. The 10-day clock starts on the first authenticated AI question, not on a status check.
+- `POST /api/v1/doubts/ask` accepts `{ "question": "...", "subject": "..." }`. A successful in-trial answer costs 0 XP; after the trial, each answer costs 10 XP. Paid answers are charged atomically only after Gemini succeeds. Insufficient balance returns HTTP `402` with `requiredXp`, `availableXp`, `xpBalance`, and trial fields. An optional `Idempotency-Key` header (up to 100 characters) makes retries return the original answer without another charge.
+- `POST /api/v1/quizzes/:id/submit` still accepts `{ "answers": [0, 1], "timeTakenSeconds": 90 }`; the server grades answers and awards the configured XP reward by accuracy. A learner can earn XP from a given quiz only once; later attempts remain available and return `xpEarned: 0`. Successful submissions include `currentXpBalance`.
+- `GET /api/v1/quizzes?grade=Class%205&subject=Science` filters published catalogue entries. `GET /api/v1/leaderboard` and `/api/v1/leaderboard/worldwide` return the worldwide board; authenticated `GET /api/v1/leaderboard/friends` returns `{ scope: "friends", currentUserRank, leaderboard }`, including the requesting learner.
+- `GET /api/v1/courses/:id/resources` returns resource records `{ id, courseId, title, resourceType, resourceUrl, estimatedMinutes, sortOrder }`. Authenticated `POST /api/v1/courses/:id/resources` accepts those fields (except `id`/`courseId`) to add a `video` or `reading` URL. No third-party catalogue URLs are seeded.
+- Enrolled learners start time tracking with `POST /api/v1/courses/:id/resources/:resourceId/sessions` (empty body), then complete with `POST /api/v1/courses/:id/resources/:resourceId/sessions/:sessionId/complete` (empty body). Both timestamps are server-generated; completion returns `elapsedSeconds`, `awardedMinutes`, `xpEarned`, and `currentXpBalance`. XP is 5 per validated minute, capped at 60 minutes per session and 120 minutes per learner per day; an active session must be completed before another starts, and completed sessions cannot be replayed.
+
+Migration `9_create_xp_and_learning_tracking` is required before using these endpoints. Re-run the database seeder to add the original published quiz catalogue: 21 quizzes total, including at least 2 quizzes per grade for Classes 5–12 (2 questions per added grade/subject quiz).

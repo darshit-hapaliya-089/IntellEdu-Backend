@@ -8,14 +8,17 @@
 import router from '@adonisjs/core/services/router'
 import { middleware } from '#start/kernel'
 
+
 // ── Lazy-load controllers ──────────────────────────────────────────────────
 const AuthController          = () => import('#controllers/auth_controller')
+const AuthOtpController       = () => import('#controllers/auth_otp_controller')
 const CoursesController       = () => import('#controllers/courses_controller')
 const QuizzesController       = () => import('#controllers/quizzes_controller')
 const LeaderboardController   = () => import('#controllers/leaderboard_controller')
 const ProgressController      = () => import('#controllers/progress_controller')
-const DoubtSolverController   = () => import('#controllers/doubt_solver_controller')
+const GeminiDoubtSolverController = () => import('#controllers/gemini_doubt_solver_controller')
 const UsersController         = () => import('#controllers/users_controller')
+const FriendsController       = () => import('#controllers/friends_controller')
 
 /*
 |--------------------------------------------------------------------------
@@ -49,11 +52,18 @@ router.group(() => {
   | PUT  /auth/me         → Update profile (protected)
   */
   router.group(() => {
-    router.post('/register', [AuthController, 'register'])
+    router.get('/whatsapp/status', async () => {
+      const { whatsappService } = await import('#services/whatsapp_service')
+      return whatsappService.getStatus()
+    })
     router.post('/login',    [AuthController, 'login'])
+    router.post('/otp/send', [AuthOtpController, 'send'])
+    router.post('/otp/verify', [AuthOtpController, 'verify'])
+    router.post('/firebase', [AuthController, 'firebase'])
     router.post('/logout',   [AuthController, 'logout']).use(middleware.auth())
     router.get('/me',        [AuthController, 'me']).use(middleware.auth())
     router.put('/me',        [AuthController, 'updateProfile']).use(middleware.auth())
+    router.put('/password',  [AuthController, 'updatePassword']).use(middleware.auth())
   }).prefix('/auth')
 
   /*
@@ -63,6 +73,15 @@ router.group(() => {
   router.group(() => {
     router.get('/:id/stats', [UsersController, 'stats'])
   }).prefix('/users').use(middleware.auth())
+
+  /*
+  |── FRIEND Routes (/api/v1/friends/*) ─────────────────────────────────────
+  */
+  router.group(() => {
+    router.get('/', [FriendsController, 'index'])
+    router.post('/:id', [FriendsController, 'store'])
+    router.delete('/:id', [FriendsController, 'destroy'])
+  }).prefix('/friends').use(middleware.auth())
 
   /*
   |── COURSE Routes (/api/v1/courses/*) ──────────────────────────────────
@@ -75,7 +94,11 @@ router.group(() => {
   */
   router.group(() => {
     router.get('/',           [CoursesController, 'index'])
+    router.get('/:id/resources', [CoursesController, 'resources'])
     router.get('/:id',        [CoursesController, 'show'])
+    router.post('/:id/resources', [CoursesController, 'addResource']).use(middleware.auth())
+    router.post('/:id/resources/:resourceId/sessions', [CoursesController, 'startLearningSession']).use(middleware.auth())
+    router.post('/:id/resources/:resourceId/sessions/:sessionId/complete', [CoursesController, 'completeLearningSession']).use(middleware.auth())
     router.post('/',          [CoursesController, 'store']).use(middleware.auth())
     router.put('/:id',        [CoursesController, 'update']).use(middleware.auth())
     router.delete('/:id',     [CoursesController, 'destroy']).use(middleware.auth())
@@ -105,6 +128,8 @@ router.group(() => {
   */
   router.group(() => {
     router.get('/',              [LeaderboardController, 'global'])
+    router.get('/worldwide',     [LeaderboardController, 'global'])
+    router.get('/friends',       [LeaderboardController, 'friends']).use(middleware.auth())
     router.get('/weekly',        [LeaderboardController, 'weekly'])
     router.get('/class/:grade',  [LeaderboardController, 'byGrade'])
   }).prefix('/leaderboard')
@@ -127,9 +152,14 @@ router.group(() => {
   | GET  /doubts/history        → My doubt history (protected)
   */
   router.group(() => {
-    router.post('/ask',          [DoubtSolverController, 'ask'])
-    router.get('/history',       [DoubtSolverController, 'history'])
+    router.post('/ask',          [GeminiDoubtSolverController, 'ask'])
+    router.get('/status',        [GeminiDoubtSolverController, 'status'])
+    router.get('/history',       [GeminiDoubtSolverController, 'history'])
   }).prefix('/doubts').use(middleware.auth())
 
 }).prefix('/api/v1')
 
+// Initialize IntellEdu WhatsApp Bot service
+import('#services/whatsapp_service').then(({ whatsappService }) => {
+  whatsappService.init().catch((err) => console.warn('[WhatsApp Bot Init Failed]:', err))
+})

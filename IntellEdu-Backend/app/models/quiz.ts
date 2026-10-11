@@ -15,7 +15,10 @@ export class QuizQuestion extends BaseModel {
   @column()
   declare question: string
 
-  @column()
+  @column({
+    prepare: (value: string[]) => JSON.stringify(value),
+    consume: (value: string[] | string) => typeof value === 'string' ? JSON.parse(value) as string[] : value,
+  })
   declare options: string[]
 
   @column()
@@ -48,6 +51,12 @@ export default class Quiz extends BaseModel {
   declare description: string | null
 
   @column()
+  declare grade: string | null
+
+  @column()
+  declare subject: string | null
+
+  @column()
   declare xpReward: number
 
   @column()
@@ -68,4 +77,3 @@ export default class Quiz extends BaseModel {
   @hasMany(() => QuizQuestion, { foreignKey: 'quizId' })
   declare questions: HasMany<typeof QuizQuestion>
 }
-

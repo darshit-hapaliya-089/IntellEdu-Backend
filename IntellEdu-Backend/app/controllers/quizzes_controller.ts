@@ -1,7 +1,8 @@
 import type { HttpContext } from '@adonisjs/core/http'
+import db from '@adonisjs/lucid/services/db'
 import Quiz from '#models/quiz'
 import QuizResult from '#models/quiz_result'
-import User from '#models/user'
+import { changeXpInTransaction } from '#services/xp_service'
 import vine from '@vinejs/vine'
 
 /*
@@ -12,11 +13,23 @@ import vine from '@vinejs/vine'
 export default class QuizzesController {
 
   /** GET /api/v1/quizzes */
-  async index({ response }: HttpContext) {
-    const quizzes = await Quiz.query()
+  async index({ request, response }: HttpContext) {
+    const query = Quiz.query()
       .where('is_published', true)
       .preload('course')
+      .orderBy('grade', 'asc')
+      .orderBy('subject', 'asc')
       .orderBy('created_at', 'desc')
+    const grade = request.input('grade')
+    const subject = request.input('subject')
+    if (grade) {
+      const numericGrade = String(grade).match(/(?:class|grade)?\s*(\d{1,2})/i)?.[1]
+      query.whereRaw('LOWER(grade) = ?', [
+        numericGrade ? `class ${numericGrade}` : String(grade).toLowerCase(),
+      ])
+    }
+    if (subject) query.whereRaw('LOWER(subject) = ?', [String(subject).toLowerCase()])
+    const quizzes = await query
     return response.ok({ quizzes })
   }
 
@@ -24,6 +37,7 @@ export default class QuizzesController {
   async show({ params, response }: HttpContext) {
     const quiz = await Quiz.query()
       .where('id', params.id)
+      .where('is_published', true)
       .preload('questions')
       .preload('course')
       .firstOrFail()
@@ -64,8 +78,18 @@ export default class QuizzesController {
 
     const quiz = await Quiz.query()
       .where('id', params.id)
+      .where('is_published', true)
       .preload('questions', (q) => q.orderBy('sort_order'))
       .firstOrFail()
+
+    if (quiz.questions.length === 0) {
+      return response.badRequest({ message: 'This quiz does not have any questions yet.' })
+    }
+    if (answers.length !== quiz.questions.length || answers.some((answer, index) =>
+      !Number.isInteger(answer) || answer < 0 || answer >= (quiz.questions[index]?.options.length ?? 0)
+    )) {
+      return response.badRequest({ message: 'Select one valid option for every quiz question.' })
+    }
 
     // Grade the quiz
     let correct = 0
@@ -79,20 +103,39 @@ export default class QuizzesController {
 
     const user = auth.getUserOrFail()
 
-    // Save result
-    const result = await QuizResult.create({
-      userId:           user.id,
-      quizId:           quiz.id,
-      score:            correct,
-      totalQuestions,
-      correctAnswers:   correct,
-      accuracy,
-      xpEarned,
-      timeTakenSeconds: timeTakenSeconds ?? null,
-    })
+    const transactionResult = await db.transaction(async (trx) => {
+      await trx.from('users').where('id', user.id).forUpdate().first()
+      const sourceKey = `quiz-completion:${user.id}:${quiz.id}`
+      const previouslyAwarded = await trx.from('xp_transactions')
+        .where('source_key', sourceKey)
+        .first()
+      const earned = previouslyAwarded || xpEarned < 1 ? 0 : xpEarned
 
-    // Award XP to user
-    await User.query().where('id', user.id).increment('points', xpEarned)
+      const result = await QuizResult.create({
+        userId: user.id,
+        quizId: quiz.id,
+        score: correct,
+        totalQuestions,
+        correctAnswers: correct,
+        accuracy,
+        xpEarned: earned,
+        timeTakenSeconds: timeTakenSeconds ?? null,
+      }, { client: trx })
+
+      let balance = Number((await trx.from('users').select('points').where('id', user.id).first()).points)
+      if (earned > 0) {
+        const change = await changeXpInTransaction(trx, {
+          userId: user.id,
+          amount: earned,
+          reason: 'quiz_completion',
+          sourceKey,
+        })
+        balance = change.balance
+      }
+
+      return { result, earned, balance }
+    })
+    const { result, earned, balance } = transactionResult
 
     // Build answer explanations for review
     const review = quiz.questions.map((q, i) => ({
@@ -104,14 +147,14 @@ export default class QuizzesController {
     }))
 
     return response.created({
-      message:         `Quiz completed! You scored ${accuracy}% and earned ${xpEarned} XP.`,
+      message:         `Quiz completed! You scored ${accuracy}% and earned ${earned} XP.`,
       score:           correct,
       totalQuestions,
       accuracy,
-      xpEarned,
+      xpEarned:        earned,
+      currentXpBalance: balance,
       resultId:        result.id,
       review,
     })
   }
 }
-

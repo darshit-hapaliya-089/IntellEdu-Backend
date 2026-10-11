@@ -39,5 +39,14 @@ export default await Env.create(new URL('../', import.meta.url), {
   */
   OPENAI_API_KEY: Env.schema.string.optional(),
   GEMINI_API_KEY: Env.schema.string.optional(),
+  FIREBASE_API_KEY: Env.schema.string.optional(),
+  TWILIO_ACCOUNT_SID: Env.schema.string.optional(),
+  TWILIO_AUTH_TOKEN: Env.schema.string.optional(),
+  TWILIO_FROM_NUMBER: Env.schema.string.optional(),
+  FAST2SMS_API_KEY: Env.schema.string.optional(),
+  SMTP_HOST: Env.schema.string.optional(),
+  SMTP_PORT: Env.schema.number.optional(),
+  SMTP_USER: Env.schema.string.optional(),
+  SMTP_PASS: Env.schema.string.optional(),
+  SMTP_FROM_EMAIL: Env.schema.string.optional(),
 })
-

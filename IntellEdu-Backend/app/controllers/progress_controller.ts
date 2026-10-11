@@ -1,7 +1,9 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import { DateTime } from 'luxon'
+import db from '@adonisjs/lucid/services/db'
 import User from '#models/user'
 import QuizResult from '#models/quiz_result'
+import { changeXpInTransaction } from '#services/xp_service'
 
 /*
 |--------------------------------------------------------------------------
@@ -37,6 +39,7 @@ export default class ProgressController {
       grade: c.grade,
       imageUrl: c.imageUrl,
       totalLessons: c.totalLessons,
+      rating: c.rating,
       completedLessons: c.$extras.pivot_completed_lessons || 0,
       progressPercent: c.$extras.pivot_progress_percent || 0,
       isCompleted: Boolean(c.$extras.pivot_is_completed),
@@ -79,31 +82,43 @@ export default class ProgressController {
   async pingStreak({ auth, response }: HttpContext) {
     const user = auth.getUserOrFail()
     const today = DateTime.now().toISODate()
-    const lastActive = user.lastActiveDate?.toISODate?.() ?? null
+    const now = DateTime.now()
+    const result = await db.transaction(async (trx) => {
+      const current = await trx.from('users').where('id', user.id).forUpdate().first()
+      const lastActive = current.last_active_date instanceof Date
+        ? current.last_active_date.toISOString().slice(0, 10)
+        : current.last_active_date
+          ? String(current.last_active_date).slice(0, 10)
+          : null
+      let currentStreak = Number(current.streak)
+      let balance = Number(current.points)
+      let streakUpdated = false
 
-    let streakUpdated = false
-    let currentStreak = user.streak
+      if (lastActive !== today) {
+        const yesterday = now.minus({ days: 1 }).toISODate()
+        currentStreak = lastActive === yesterday ? currentStreak + 1 : 1
+        await trx.from('users').where('id', user.id).update({
+          streak: currentStreak,
+          last_active_date: today,
+          updated_at: now.toJSDate(),
+        })
+        balance = (await changeXpInTransaction(trx, {
+          userId: user.id,
+          amount: 25,
+          reason: 'daily_streak',
+          sourceKey: `daily-streak:${user.id}:${today}`,
+        })).balance
+        streakUpdated = true
+      }
 
-    if (lastActive !== today) {
-      const yesterday = DateTime.now().minus({ days: 1 }).toISODate()
-      currentStreak = lastActive === yesterday ? user.streak + 1 : 1
-
-      // Bonus XP for maintaining streak
-      const bonusXp = 25
-      await user.merge({
-        streak: currentStreak,
-        lastActiveDate: DateTime.now(),
-        points: user.points + bonusXp,
-      }).save()
-
-      streakUpdated = true
-    }
+      return { streakUpdated, currentStreak, balance }
+    })
 
     return response.ok({
-      message: streakUpdated ? 'Streak updated for today! +25 XP bonus awarded.' : 'Streak already active for today.',
-      streak: currentStreak,
-      points: user.points,
+      message: result.streakUpdated ? 'Streak updated for today! +25 XP bonus awarded.' : 'Streak already active for today.',
+      streak: result.currentStreak,
+      points: result.balance,
+      currentXpBalance: result.balance,
     })
   }
 }
-

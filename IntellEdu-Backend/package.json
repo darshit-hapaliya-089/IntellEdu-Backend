@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node ace serve --hmr",
-    "build": "node ace build",
+    "build": "node ace build && node -e \"require('node:fs').cpSync('public', 'build/public', { recursive: true })\"",
     "start": "node bin/server.js",
     "test": "node ace test",
     "lint": "eslint . --ext=.ts",
@@ -32,8 +32,12 @@
     "@adonisjs/cors": "^2.2.1",
     "@adonisjs/lucid": "^21.6.0",
     "@vinejs/vine": "^4.4.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "luxon": "^3.5.0",
+    "nodemailer": "^10.1.0",
     "pg": "^8.13.3",
+    "pino": "^10.4.0",
+    "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
@@ -44,6 +48,9 @@
     "@japa/runner": "^3.1.4",
     "@types/luxon": "^3.4.2",
     "@types/node": "^22.14.1",
+    "@types/nodemailer": "^8.0.2",
+    "@types/qrcode": "^1.5.6",
+    "hot-hook": "^0.2.6",
     "ts-node": "^10.9.2",
     "typescript": "~5.7.2"
   }

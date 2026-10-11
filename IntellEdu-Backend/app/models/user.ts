@@ -25,7 +25,13 @@ export default class User extends compose(BaseModel, AuthFinder) {
   declare email: string
 
   @column()
+  declare emailVerified: boolean
+
+  @column()
   declare phone: string | null
+
+  @column()
+  declare phoneVerified: boolean
 
   @column({ serializeAs: null })   // never expose password in API responses
   declare password: string
@@ -51,6 +57,9 @@ export default class User extends compose(BaseModel, AuthFinder) {
 
   @column({ prepare: (v) => v?.toISODate?.() ?? v })
   declare lastActiveDate: DateTime | null
+
+  @column.dateTime()
+  declare aiFirstUsedAt: DateTime | null
 
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
@@ -80,5 +89,11 @@ export default class User extends compose(BaseModel, AuthFinder) {
     type: 'auth_token',
     tokenSecretLength: 40,
   })
-}
 
+  @beforeSave()
+  static async hashUserPassword(user: User) {
+    if (user.$dirty.password) {
+      user.password = await hash.use('scrypt').make(user.password)
+    }
+  }
+}

@@ -1,6 +1,10 @@
 import type { HttpContext } from '@adonisjs/core/http'
 import { DateTime } from 'luxon'
+import { randomBytes } from 'node:crypto'
 import User from '#models/user'
+import { changeXp } from '#services/xp_service'
+import hash from '@adonisjs/core/services/hash'
+import env from '#start/env'
 import vine from '@vinejs/vine'
 
 /*
@@ -10,62 +14,6 @@ import vine from '@vinejs/vine'
 | Handles registration, login, logout and profile management.
 */
 export default class AuthController {
-
-  /*
-  |──────────────────────────────────────────────────────────────────────────
-  | POST /api/v1/auth/register
-  |──────────────────────────────────────────────────────────────────────────
-  */
-  async register({ request, response }: HttpContext) {
-    const schema = vine.compile(
-      vine.object({
-        fullName:  vine.string().trim().minLength(2),
-        email:     vine.string().trim().email(),
-        phone:     vine.string().optional(),
-        password:  vine.string().minLength(6),
-        grade:     vine.string().trim(),
-      })
-    )
-
-    const data = await request.validateUsing(schema)
-
-    // Check for duplicate email
-    const existing = await User.findBy('email', data.email)
-    if (existing) {
-      return response.conflict({ message: 'An account with this email already exists.' })
-    }
-
-    const user = await User.create({
-      fullName:  data.fullName,
-      email:     data.email,
-      phone:     data.phone ?? null,
-      password:  data.password,
-      grade:     data.grade,
-      role:      'student',
-      points:    100,   // welcome bonus XP
-      streak:    1,
-      badge:     '🌟 Newcomer',
-      lastActiveDate: DateTime.now(),
-    })
-
-    const token = await User.accessTokens.create(user)
-
-    return response.created({
-      message: 'Account created successfully! Welcome to IntellEdu.',
-      token:   token.value!.release(),
-      user: {
-        id:       user.id,
-        fullName: user.fullName,
-        email:    user.email,
-        grade:    user.grade,
-        points:   user.points,
-        streak:   user.streak,
-        badge:    user.badge,
-        role:     user.role,
-        avatarUrl: user.avatarUrl,
-      },
-    })
-  }
 
   /*
   |──────────────────────────────────────────────────────────────────────────
@@ -83,6 +31,9 @@ export default class AuthController {
     const { email, password } = await request.validateUsing(schema)
 
     const user = await User.verifyCredentials(email, password)
+    if (!user.emailVerified) {
+      return response.forbidden({ message: 'Verify your email with the 6-digit OTP before signing in.' })
+    }
 
     // Update streak logic
     const today = DateTime.now().toISODate()
@@ -108,6 +59,125 @@ export default class AuthController {
         streak:    user.streak,
         badge:     user.badge,
         role:      user.role,
+        avatarUrl: user.avatarUrl,
+      },
+    })
+  }
+
+  /** POST /api/v1/auth/firebase */
+  async firebase({ request, response }: HttpContext) {
+    const schema = vine.compile(
+      vine.object({
+        idToken: vine.string().trim().minLength(20),
+        mode: vine.enum(['login', 'signup'] as const),
+        fullName: vine.string().trim().minLength(2).optional(),
+        grade: vine.string().trim().optional(),
+      })
+    )
+    const data = await request.validateUsing(schema)
+    const apiKey = env.get('FIREBASE_API_KEY')
+
+    if (!apiKey) {
+      return response.status(503).send({ message: 'Firebase authentication is not configured.' })
+    }
+
+    let lookupResponse: Response
+    try {
+      lookupResponse = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken: data.idToken }),
+          signal: AbortSignal.timeout(10000),
+        }
+      )
+    } catch {
+      return response.status(502).send({ message: 'Could not verify the Firebase identity.' })
+    }
+
+    if (!lookupResponse.ok) {
+      return response.unauthorized({ message: 'Firebase identity token is invalid or expired.' })
+    }
+
+    const identity = (await lookupResponse.json()) as {
+      users?: Array<{
+        localId: string
+        email?: string
+        emailVerified?: boolean
+        displayName?: string
+        phoneNumber?: string
+        photoUrl?: string
+        providerUserInfo?: Array<{ providerId: string }>
+      }>
+    }
+    const firebaseUser = identity.users?.[0]
+    const providerIds = firebaseUser?.providerUserInfo?.map((provider) => provider.providerId) ?? []
+    const isGoogleIdentity = providerIds.includes('google.com')
+    const isPhoneIdentity = providerIds.includes('phone')
+
+    if (
+      !firebaseUser ||
+      (!isGoogleIdentity && !isPhoneIdentity) ||
+      (isGoogleIdentity && (!firebaseUser.email || !firebaseUser.emailVerified)) ||
+      (isPhoneIdentity && !firebaseUser.phoneNumber)
+    ) {
+      return response.unauthorized({ message: 'Use a verified Google account or phone number.' })
+    }
+
+    const email = firebaseUser.email?.toLowerCase() ?? `phone-${firebaseUser.localId}@phone.intelledu.invalid`
+    let user = firebaseUser.phoneNumber ? await User.findBy('phone', firebaseUser.phoneNumber) : null
+    user ??= firebaseUser.email ? await User.findBy('email', email) : null
+
+    if (user && data.mode === 'signup') {
+      return response.conflict({ message: 'An account with this verified identity already exists.' })
+    }
+    if (!user && data.mode === 'login') {
+      return response.notFound({ message: 'No IntellEdu account is linked to this verified identity. Sign up first.' })
+    }
+
+    if (!user) {
+      user = await User.create({
+        fullName: data.fullName || firebaseUser.displayName || 'Student',
+        email,
+        emailVerified: isGoogleIdentity,
+        phone: firebaseUser.phoneNumber ?? null,
+        phoneVerified: isPhoneIdentity,
+        password: randomBytes(32).toString('hex'),
+        grade: data.grade || 'Class 10 Science',
+        role: 'student',
+        points: 0,
+        streak: 1,
+        badge: '🌟 Newcomer',
+        lastActiveDate: DateTime.now(),
+        avatarUrl: firebaseUser.photoUrl ?? null,
+      })
+      const initialXp = await changeXp({
+        userId: user.id,
+        amount: 100,
+        reason: 'new_account_bonus',
+        sourceKey: `signup:${user.id}`,
+      })
+      user.points = initialXp.balance
+    } else {
+      if (isGoogleIdentity) user.emailVerified = true
+      if (isPhoneIdentity) user.phoneVerified = true
+      await user.save()
+    }
+
+    const token = await User.accessTokens.create(user)
+    return response.ok({
+      message: data.mode === 'signup' ? 'Account created successfully.' : 'Login successful.',
+      token: token.value!.release(),
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        email: user.email,
+        grade: user.grade,
+        points: user.points,
+        streak: user.streak,
+        badge: user.badge,
+        role: user.role,
         avatarUrl: user.avatarUrl,
       },
     })
@@ -172,5 +242,24 @@ export default class AuthController {
 
     return response.ok({ message: 'Profile updated successfully.', user })
   }
-}
 
+  async updatePassword({ auth, request, response }: HttpContext) {
+    const schema = vine.compile(
+      vine.object({
+        currentPassword: vine.string().minLength(1),
+        newPassword: vine.string().minLength(6).maxLength(128),
+      })
+    )
+    const { currentPassword, newPassword } = await request.validateUsing(schema)
+    const user = auth.getUserOrFail()
+    const currentPasswordValid = await hash.use('scrypt').verify(user.password, currentPassword)
+
+    if (!currentPasswordValid) {
+      return response.badRequest({ message: 'Current password is incorrect.' })
+    }
+
+    user.password = newPassword
+    await user.save()
+    return response.ok({ message: 'Password updated successfully.' })
+  }
+}

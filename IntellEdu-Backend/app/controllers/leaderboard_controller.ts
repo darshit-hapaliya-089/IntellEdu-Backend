@@ -1,4 +1,5 @@
 import type { HttpContext } from '@adonisjs/core/http'
+import db from '@adonisjs/lucid/services/db'
 import User from '#models/user'
 import { DateTime } from 'luxon'
 
@@ -9,7 +10,7 @@ import { DateTime } from 'luxon'
 */
 export default class LeaderboardController {
 
-  /** GET /api/v1/leaderboard — Global top 50 by XP points */
+  /** GET /api/v1/leaderboard — Worldwide top 50 by XP points */
   async global({ response }: HttpContext) {
     const leaders = await User.query()
       .where('role', 'student')
@@ -18,6 +19,7 @@ export default class LeaderboardController {
       .select(['id', 'full_name', 'grade', 'points', 'streak', 'badge', 'avatar_url'])
 
     return response.ok({
+      scope: 'worldwide',
       leaderboard: leaders.map((u, idx) => ({
         rank:      idx + 1,
         id:        u.id,
@@ -28,6 +30,40 @@ export default class LeaderboardController {
         badge:     u.badge,
         avatarUrl: u.avatarUrl,
       })),
+    })
+  }
+
+  /** GET /api/v1/leaderboard/friends [Protected] */
+  async friends({ auth, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const relations = await db.from('user_friends')
+      .where((query) => query.where('user_id', user.id).orWhere('friend_id', user.id))
+      .select('user_id', 'friend_id')
+    const friendIds = relations.map((relation) =>
+      Number(relation.user_id) === user.id ? Number(relation.friend_id) : Number(relation.user_id)
+    )
+    const accountIds = [...new Set([user.id, ...friendIds])]
+    const leaders = await User.query()
+      .whereIn('id', accountIds)
+      .where('role', 'student')
+      .orderBy('points', 'desc')
+      .orderBy('id', 'asc')
+      .select(['id', 'full_name', 'grade', 'points', 'streak', 'badge', 'avatar_url'])
+    const leaderboard = leaders.map((account, index) => ({
+      rank: index + 1,
+      id: account.id,
+      name: account.fullName,
+      grade: account.grade,
+      points: account.points,
+      streak: account.streak,
+      badge: account.badge,
+      avatarUrl: account.avatarUrl,
+      isCurrentUser: account.id === user.id,
+    }))
+    return response.ok({
+      scope: 'friends',
+      currentUserRank: leaderboard.find((entry) => entry.isCurrentUser)?.rank ?? null,
+      leaderboard,
     })
   }
 
@@ -83,4 +119,3 @@ export default class LeaderboardController {
     })
   }
 }
-

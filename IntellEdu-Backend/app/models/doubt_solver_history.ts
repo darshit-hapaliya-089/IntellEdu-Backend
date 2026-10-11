@@ -21,6 +21,12 @@ export default class DoubtSolverHistory extends BaseModel {
   @column()
   declare subject: string | null
 
+  @column()
+  declare xpCost: number
+
+  @column()
+  declare clientRequestId: string | null
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 
@@ -30,4 +36,3 @@ export default class DoubtSolverHistory extends BaseModel {
   @belongsTo(() => User)
   declare user: BelongsTo<typeof User>
 }
-
