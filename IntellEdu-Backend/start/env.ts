@@ -40,6 +40,7 @@ const appEnv = await Env.create(new URL('../', import.meta.url), {
   OPENAI_API_KEY: Env.schema.string.optional(),
   GEMINI_API_KEY: Env.schema.string.optional(),
   FIREBASE_API_KEY: Env.schema.string.optional(),
+  FIREBASE_PROJECT_ID: Env.schema.string.optional(),
   TWILIO_ACCOUNT_SID: Env.schema.string.optional(),
   TWILIO_AUTH_TOKEN: Env.schema.string.optional(),
   TWILIO_FROM_NUMBER: Env.schema.string.optional(),
