@@ -54,6 +54,7 @@ const appEnv = await Env.create(new URL('../', import.meta.url), {
   BREVO_API_KEY: Env.schema.string.optional(),
   EMAIL_FROM: Env.schema.string.optional(),
   EMAIL_FROM_NAME: Env.schema.string.optional(),
+  EMAIL_LOGO_URL: Env.schema.string.optional(),
   WHATSAPP_ENABLED: Env.schema.string.optional(),
   WHATSAPP_AUTH_DIR: Env.schema.string.optional(),
 })

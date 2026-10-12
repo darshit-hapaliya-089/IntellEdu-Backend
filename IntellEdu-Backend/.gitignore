@@ -16,3 +16,4 @@ storage/whatsapp-auth/
 **/creds.json
 *.creds
 *.creds.json
+/storage/email-preview.html

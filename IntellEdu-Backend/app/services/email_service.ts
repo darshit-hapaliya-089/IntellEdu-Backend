@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer'
 import type { Transporter } from 'nodemailer'
 import env from '#start/env'
+import { createOtpEmail } from './email_templates/otp_email.js'
 
 const EMAIL_TIMEOUT_MS = 7000
 
@@ -13,12 +14,8 @@ export class EmailDeliveryError extends Error {
 
 let smtpTransporter: Transporter | null = null
 
-function emailContent(code: string) {
-  return {
-    subject: `${code} is your IntellEdu verification code`,
-    text: `Your IntellEdu verification code is ${code}. It expires in 60 seconds. Do not share it with anyone.\n\n${code}\n\nIntellEdu`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8faff;border-radius:16px;border:1px solid #e0e7ff;color:#1e293b;text-align:center"><h2 style="color:#4f46e5">IntellEdu Verification</h2><p>Enter this code to verify your account. It expires in 60 seconds.</p><div style="background:#fff;border:2px solid #6366f1;border-radius:12px;padding:24px;font-family:monospace;font-size:36px;font-weight:900;letter-spacing:8px;color:#1e1b4b">${code}</div><p style="color:#64748b;font-size:12px">Never share this code with anyone.</p></div>`,
-  }
+function otpEmail(code: string) {
+  return createOtpEmail(code, 60, env.get('EMAIL_LOGO_URL') || undefined)
 }
 
 function getSmtpTransporter(): Transporter {
@@ -74,7 +71,7 @@ async function sendWithBrevo(to: string, code: string): Promise<void> {
   if (!apiKey) throw new EmailDeliveryError('Brevo email is not configured. Set BREVO_API_KEY.', 503)
   if (!fromEmail) throw new EmailDeliveryError('Brevo email is not configured. Set EMAIL_FROM to a verified sender.', 503)
 
-  const { subject, text, html } = emailContent(code)
+  const { subject, text, html } = otpEmail(code)
   let result: Response
   try {
     result = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -116,7 +113,7 @@ export async function sendOtpEmail(to: string, code: string): Promise<void> {
     await getSmtpTransporter().sendMail({
       from: `"${env.get('EMAIL_FROM_NAME') || 'IntellEdu'}" <${env.get('SMTP_USER')}>`,
       to,
-      ...emailContent(code),
+      ...otpEmail(code),
     })
   } catch (error) {
     if (error instanceof EmailDeliveryError) throw error

@@ -9,6 +9,7 @@
     "build": "node ace build",
     "lint": "eslint . --ext=.ts",
     "format": "prettier --write .",
+    "email:preview": "npm run build && node scripts/email_preview.mjs",
     "migration:run": "node ace migration:run",
     "migration:rollback": "node ace migration:rollback",
     "db:seed": "node ace db:seed"
