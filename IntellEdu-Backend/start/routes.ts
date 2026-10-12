@@ -7,6 +7,7 @@
 */
 import router from '@adonisjs/core/services/router'
 import { middleware } from '#start/kernel'
+import env from '#start/env'
 
 
 // ── Lazy-load controllers ──────────────────────────────────────────────────
@@ -159,7 +160,9 @@ router.group(() => {
 
 }).prefix('/api/v1')
 
-// Initialize IntellEdu WhatsApp Bot service
-import('#services/whatsapp_service').then(({ whatsappService }) => {
-  whatsappService.init().catch((err) => console.warn('[WhatsApp Bot Init Failed]:', err))
-})
+// Do not load or initialize Baileys unless explicitly enabled for a local machine.
+if (env.get('WHATSAPP_ENABLED')?.toLowerCase() === 'true') {
+  import('#services/whatsapp_service')
+    .then(({ whatsappService }) => whatsappService.init())
+    .catch(() => console.warn('[WhatsApp] Initialization failed.'))
+}

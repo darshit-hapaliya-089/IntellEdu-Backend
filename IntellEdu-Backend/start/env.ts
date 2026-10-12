@@ -7,11 +7,11 @@
 */
 import { Env } from '@adonisjs/core/env'
 
-export default await Env.create(new URL('../', import.meta.url), {
+const appEnv = await Env.create(new URL('../', import.meta.url), {
   NODE_ENV: Env.schema.enum(['development', 'production', 'test'] as const),
-  PORT: Env.schema.number(),
+  PORT: Env.schema.number.optional(),
   APP_KEY: Env.schema.string(),
-  HOST: Env.schema.string({ format: 'host' }),
+  HOST: Env.schema.string.optional(),
   LOG_LEVEL: Env.schema.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']),
 
   /*
@@ -49,4 +49,15 @@ export default await Env.create(new URL('../', import.meta.url), {
   SMTP_USER: Env.schema.string.optional(),
   SMTP_PASS: Env.schema.string.optional(),
   SMTP_FROM_EMAIL: Env.schema.string.optional(),
+  WHATSAPP_ENABLED: Env.schema.string.optional(),
+  WHATSAPP_AUTH_DIR: Env.schema.string.optional(),
 })
+
+const port = appEnv.get('PORT') ?? 3333
+const host = appEnv.get('HOST') ?? (appEnv.get('NODE_ENV') === 'production' ? '0.0.0.0' : '127.0.0.1')
+appEnv.set('PORT', port)
+appEnv.set('HOST', host)
+process.env.PORT ??= String(port)
+process.env.HOST ??= host
+
+export default appEnv

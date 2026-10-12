@@ -3,20 +3,26 @@ import type { WASocket, ConnectionState } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import QRCode from 'qrcode'
 import path from 'node:path'
+import env from '#start/env'
 
 class WhatsAppService {
   private socket: WASocket | null = null
   private isConnected = false
   private isConnecting = false
-  private latestQr: string | null = null
   private latestQrDataUrl: string | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  isEnabled(): boolean {
+    return env.get('WHATSAPP_ENABLED')?.toLowerCase() === 'true'
+  }
 
   async init(): Promise<void> {
+    if (!this.isEnabled()) return
     if (this.socket || this.isConnecting) return
     this.isConnecting = true
 
     try {
-      const authPath = path.resolve(process.cwd(), 'whatsapp_auth_info')
+      const authPath = path.resolve(process.cwd(), env.get('WHATSAPP_AUTH_DIR') || './storage/whatsapp-auth')
       const { state, saveCreds } = await useMultiFileAuthState(authPath)
 
       const sock = makeWASocket({
@@ -31,51 +37,48 @@ class WhatsAppService {
         const { connection, lastDisconnect, qr } = update
 
         if (qr) {
-          this.latestQr = qr
           try {
             this.latestQrDataUrl = await QRCode.toDataURL(qr)
-            const terminalQr = await QRCode.toString(qr, { type: 'terminal', small: true })
-            console.log('\n======================================================')
-            console.log('📱 [IntellEdu WhatsApp Bot] Scan this QR Code with WhatsApp:')
-            console.log('(Open WhatsApp > Linked Devices > Link a Device)')
-            console.log('======================================================')
-            console.log(terminalQr)
-            console.log('======================================================\n')
-          } catch (qrErr) {
-            console.warn('[WhatsApp QR Error]:', qrErr)
+            console.info('[WhatsApp] Local device-link QR is ready.')
+          } catch {
+            console.warn('[WhatsApp] Could not prepare a device-link QR.')
           }
         }
 
         if (connection === 'open') {
           this.isConnected = true
           this.isConnecting = false
-          this.latestQr = null
           this.latestQrDataUrl = null
-          console.log('\n======================================================')
-          console.log('✅ [IntellEdu WhatsApp Bot] Successfully Connected!')
-          console.log('📱 Ready to send direct OTP messages to student WhatsApp numbers!')
-          console.log('======================================================\n')
+          console.info('[WhatsApp] Connected.')
         }
 
         if (connection === 'close') {
           this.isConnected = false
           this.isConnecting = false
+          this.socket = null
           const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut
-
-          console.log(`[WhatsApp Bot] Connection closed (code ${statusCode}). Reconnecting: ${shouldReconnect}`)
-          if (shouldReconnect) {
-            setTimeout(() => this.init(), 3000)
-          } else {
-            this.socket = null
+          if (statusCode === DisconnectReason.connectionReplaced) {
+            console.warn('[WhatsApp] Connection replaced; automatic reconnect stopped.')
+            return
           }
+          if (statusCode === DisconnectReason.loggedOut) {
+            console.warn('[WhatsApp] Logged out; automatic reconnect stopped.')
+            return
+          }
+
+          console.warn(`[WhatsApp] Connection closed${statusCode ? ` (${statusCode})` : ''}; reconnecting shortly.`)
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null
+            void this.init()
+          }, 3000)
         }
       })
 
       this.socket = sock
-    } catch (err) {
+    } catch {
       this.isConnecting = false
-      console.warn('[WhatsApp Bot Init Failed]:', err)
+      console.warn('[WhatsApp] Initialization failed.')
     }
   }
 
@@ -88,10 +91,7 @@ class WhatsAppService {
   }
 
   async sendOtpMessage(phoneNumber: string, code: string): Promise<boolean> {
-    if (!this.isConnected || !this.socket) {
-      console.warn(`[WhatsApp Bot] Not connected yet. Cannot send to ${phoneNumber}. Logging OTP to console.`)
-      return false
-    }
+    if (!this.isEnabled() || !this.isConnected || !this.socket) return false
 
     try {
       const cleanDigits = phoneNumber.replace(/\D/g, '')
@@ -100,10 +100,9 @@ class WhatsAppService {
       const messageText = `🎓 *IntellEdu Verification*\n\nHello! Your 6-digit verification code is:\n\n👉 *${code}*\n\n⏱️ This code expires in 60 seconds.\n🔒 Do not share this OTP with anyone.\n\n— Team IntellEdu`
 
       await this.socket.sendMessage(jid, { text: messageText })
-      console.log(`\n✅ [WHATSAPP OTP DELIVERED] Direct message sent to ${phoneNumber}!\n`)
       return true
-    } catch (sendErr) {
-      console.warn(`[WhatsApp Send Failed to ${phoneNumber}]:`, sendErr)
+    } catch {
+      console.warn('[WhatsApp] OTP delivery failed.')
       return false
     }
   }
@@ -111,4 +110,3 @@ class WhatsAppService {
 
 export const whatsappService = new WhatsAppService()
 export default whatsappService
-

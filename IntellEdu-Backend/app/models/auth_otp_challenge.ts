@@ -49,6 +49,9 @@ export default class AuthOtpChallenge extends BaseModel {
   @column()
   declare grade: string | null
 
+  @column()
+  declare emailFallback: boolean
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 

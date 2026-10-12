@@ -4,3 +4,15 @@ node_modules/
 tmp/
 *.log
 
+# Baileys linked-device credentials and session state
+whatsapp_auth_info/
+auth_info/
+baileys_auth/
+storage/whatsapp-auth/
+**/whatsapp_auth_info/
+**/auth_info/
+**/baileys_auth/
+**/whatsapp-auth/
+**/creds.json
+*.creds
+*.creds.json

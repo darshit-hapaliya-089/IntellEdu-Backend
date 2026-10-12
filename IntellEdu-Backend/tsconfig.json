@@ -10,8 +10,8 @@
     "skipLibCheck": true,
     "outDir": "./build",
     "rootDir": "./",
-    "declaration": true,
-    "declarationMap": true,
+    "declaration": false,
+    "declarationMap": false,
     "sourceMap": true,
     "paths": {
       "#controllers/*": ["./app/controllers/*.js"],
