@@ -52,6 +52,12 @@ export default class AuthOtpChallenge extends BaseModel {
   @column()
   declare emailFallback: boolean
 
+  @column()
+  declare deliveryStatus: 'pending' | 'sent' | 'failed'
+
+  @column()
+  declare deliveryError: string | null
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 

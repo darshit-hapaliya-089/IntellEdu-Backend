@@ -1,19 +1,20 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { HttpContext } from '@adonisjs/core/http'
 import { DateTime } from 'luxon'
-import nodemailer from 'nodemailer'
-import app from '@adonisjs/core/services/app'
+import { parsePhoneNumberFromString } from 'libphonenumber-js'
 import AuthOtpChallenge from '#models/auth_otp_challenge'
 import User from '#models/user'
 import { changeXp } from '#services/xp_service'
+import { EmailDeliveryError, sendOtpEmail } from '#services/email_service'
 import env from '#start/env'
 import vine from '@vinejs/vine'
 
 const OTP_LIFETIME_SECONDS = 60
-const OTP_RESEND_SECONDS = 60
+const OTP_RESEND_SECONDS = 45
 const OTP_MAX_ATTEMPTS = 5
-const OTP_SEND_LIMIT = 3
-const OTP_SEND_WINDOW_MINUTES = 15
+const OTP_SEND_LIMIT = 5
+const OTP_SEND_WINDOW_MINUTES = 10
+const OTP_DELIVERY_TIMEOUT_MS = 8000
 
 function hashCode(challengeId: string, recipient: string, code: string): Buffer {
   return createHmac('sha256', env.get('APP_KEY'))
@@ -25,51 +26,114 @@ function makePhoneAccountEmail(phone: string): string {
   return `phone-${phone.replace(/\D/g, '')}@phone.intelledu.invalid`
 }
 
-function hasEmailOtpSettings(): boolean {
-  return Boolean(env.get('SMTP_HOST') && env.get('SMTP_PORT') && env.get('SMTP_USER') && env.get('SMTP_PASS'))
+function normalizePhoneNumber(value: string): string | null {
+  const parsed = parsePhoneNumberFromString(value, 'IN')
+  return parsed?.isValid() ? parsed.number : null
 }
 
-async function sendEmailOtp(recipient: string, code: string): Promise<void> {
-  const host = env.get('SMTP_HOST')
-  const port = env.get('SMTP_PORT') || 465
-  const user = env.get('SMTP_USER')
-  const pass = env.get('SMTP_PASS')
-  if (!host || !user || !pass) throw new Error('Email OTP is not configured.')
+const validPhoneNumber = vine.createRule((value, _options, field) => {
+  if (typeof value === 'string' && !normalizePhoneNumber(value)) {
+    field.report(
+      'Enter a valid phone number with its country code, for example +919876543210.',
+      'phoneNumber',
+      field
+    )
+  }
+})
 
-  const from = env.get('SMTP_FROM_EMAIL') || user
-  const mailer = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass: pass.replace(/\s+/g, '') },
+const validRecipient = vine.createRule((value, _options, field) => {
+  if (typeof value !== 'string') return
+  const isEmail = value.includes('@')
+  const valid = isEmail
+    ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+    : Boolean(normalizePhoneNumber(value))
+  if (!valid) {
+    field.report(
+      isEmail
+        ? 'Enter a valid email address.'
+        : 'Enter a valid phone number with its country code, for example +919876543210.',
+      'validRecipient',
+      field
+    )
+  }
+})
+
+const validEmailAddress = vine.createRule((value, _options, field) => {
+  if (typeof value === 'string' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    field.report('Enter a valid email address.', 'email', field)
+  }
+})
+
+function withDeliveryTimeout<T>(task: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('OTP delivery timed out. Please retry in a moment.')), OTP_DELIVERY_TIMEOUT_MS)
+    task.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
   })
-  await mailer.sendMail({
-    from: `"IntellEdu" <${from}>`,
-    replyTo: from,
-    to: recipient,
-    subject: `${code} is your IntellEdu verification code`,
-    text: `Your IntellEdu verification code is ${code}. The six-digit code is shown by itself below. Select only those six digits to copy. It expires in 60 seconds. Do not share it with anyone.\n\n${code}\n\nIntellEdu`,
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8faff;border-radius:16px;border:1px solid #e0e7ff;color:#1e293b;">
-        <div style="text-align:center;margin-bottom:24px;">
-          <img src="cid:intelledu-logo" alt="IntellEdu" width="96" height="96" style="display:block;margin:0 auto 12px;border-radius:22px;" />
-          <h2 style="color:#4f46e5;margin:0;">IntellEdu Verification</h2>
-        </div>
-        <p style="color:#475569;margin:0 0 24px;font-size:14px;text-align:center;">Enter the code below to verify your account.</p>
-        <div style="background:#ffffff;border:2px solid #6366f1;border-radius:12px;padding:24px;text-align:center;">
-          <span style="display:inline-block;font-family:monospace;font-size:36px;font-weight:900;letter-spacing:8px;color:#1e1b4b;-webkit-user-select:all;user-select:all;">${code}</span>
-        </div>
-        <p style="color:#64748b;font-size:12px;margin:12px 0 0;text-align:center;">Select only the six digits above to copy the OTP.</p>
-        <p style="color:#64748b;font-size:12px;margin:20px 0 0;text-align:center;">This code expires in <strong>60 seconds</strong>. Never share this code with anyone.</p>
-        <p style="color:#94a3b8;font-size:12px;margin:20px 0 0;text-align:center;">IntellEdu · Smarter Learning for a Brighter Future</p>
-      </div>
-    `,
-    attachments: [{
-      filename: 'intelledu-logo.png',
-      path: app.makePath('public/intelledu-logo.png'),
-      cid: 'intelledu-logo',
-    }],
-  })
+}
+
+async function sendSmsOtp(recipient: string, code: string): Promise<void> {
+  const fast2smsKey = env.get('FAST2SMS_API_KEY')
+  const twilioAccountSid = env.get('TWILIO_ACCOUNT_SID')
+  const twilioAuthToken = env.get('TWILIO_AUTH_TOKEN')
+  const twilioFromNumber = env.get('TWILIO_FROM_NUMBER')
+
+  if (fast2smsKey) {
+    const parsed = parsePhoneNumberFromString(recipient)
+    if (parsed?.country !== 'IN') {
+      throw new Error('SMS delivery is only configured for Indian phone numbers. Choose WhatsApp or email instead.')
+    }
+    const response = await fetch('https://www.fast2sms.com/dev/bulkV2', {
+      method: 'POST',
+      headers: {
+        authorization: fast2smsKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        route: 'q',
+        message: `Your IntellEdu OTP is ${code}. Valid 60 sec. Do not share. -IntellEdu`,
+        language: 'english',
+        flash: 0,
+        numbers: parsed.nationalNumber,
+      }),
+      signal: AbortSignal.timeout(7000),
+    })
+    const body = await response.json() as { return?: boolean }
+    if (!response.ok || !body.return) throw new Error('SMS provider rejected the request. Check your SMS provider configuration.')
+    return
+  }
+
+  if (twilioAccountSid && twilioAuthToken && twilioFromNumber) {
+    const form = new URLSearchParams({
+      From: twilioFromNumber,
+      To: recipient,
+      Body: `Your IntellEdu OTP is ${code}. Valid 60 sec. Do not share. -IntellEdu`,
+    })
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(twilioAccountSid)}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${twilioAccountSid}:${twilioAuthToken}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: form,
+        signal: AbortSignal.timeout(7000),
+      }
+    )
+    if (!response.ok) throw new Error('SMS provider rejected the request. Check your SMS provider configuration.')
+    return
+  }
+  throw new Error('SMS is not configured. Choose WhatsApp or email, or configure an SMS provider.')
 }
 
 export default class AuthOtpController {
@@ -79,63 +143,78 @@ export default class AuthOtpController {
       vine.object({
         channel: vine.enum(['email', 'phone', 'whatsapp'] as const),
         flow: vine.enum(['login', 'signup'] as const),
-        recipient: vine.string().trim().maxLength(254),
+        recipient: vine.string().trim().maxLength(254).use(validRecipient()),
         fullName: vine.string().trim().minLength(2).maxLength(120).optional(),
-        email: vine.string().trim().email().maxLength(254).optional(),
-        phone: vine.string().trim().regex(/^\+[1-9]\d{7,14}$/).optional(),
+        email: vine.string().trim().maxLength(254).use(validEmailAddress()).optional(),
+        phone: vine.string().trim().maxLength(32).use(validPhoneNumber()).optional(),
         grade: vine.string().trim().maxLength(100).optional(),
       })
     )
     const data = await request.validateUsing(schema)
-    const recipient = data.channel === 'email' ? data.recipient.toLowerCase() : data.recipient
+    const normalizedEmail = data.email?.trim().toLowerCase() || null
+    const normalizedProfilePhone = data.phone ? normalizePhoneNumber(data.phone) : null
+    const normalizedRecipient = data.channel === 'email'
+      ? data.recipient.toLowerCase()
+      : normalizePhoneNumber(data.recipient)
 
-    if (
-      (data.channel === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) ||
-      ((data.channel === 'phone' || data.channel === 'whatsapp') && !/^\+[1-9]\d{7,14}$/.test(recipient))
-    ) {
+    if (data.channel === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedRecipient ?? '')) {
+      return response.badRequest({ success: false, message: 'Enter a valid email address.' })
+    }
+    if (data.channel !== 'email' && !normalizedRecipient) {
       return response.badRequest({
-        message: data.channel === 'email'
-          ? 'Enter a valid email address.'
-          : 'Enter a phone number in international format, for example +919876543210.',
+        success: false,
+        message: 'Enter a valid phone number with its country code, for example +919876543210.',
       })
     }
+    if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail ?? '')) {
+      return response.badRequest({ success: false, message: 'Enter a valid email address for email fallback.' })
+    }
+    if (data.phone && !normalizedProfilePhone) {
+      return response.badRequest({
+        success: false,
+        message: 'Enter a valid phone number. Choose its country in the phone selector and enter the local number.',
+      })
+    }
+    const recipient = normalizedRecipient ?? ''
 
+    let existingUser: User | null = null
     if (data.flow === 'signup') {
       if (!data.fullName || !data.grade) {
-        return response.badRequest({ message: 'Enter your name and grade before requesting a signup code.' })
+        return response.badRequest({ success: false, message: 'Enter your name and grade before requesting a signup code.' })
       }
-      if ((data.channel === 'phone' || data.channel === 'whatsapp') && data.phone && data.phone !== recipient) {
-        return response.badRequest({ message: 'Verify the same phone number entered in your profile.' })
+      if (data.channel !== 'email' && normalizedProfilePhone && normalizedProfilePhone !== recipient) {
+        return response.badRequest({ success: false, message: 'Verify the same phone number entered in your profile.' })
       }
-      if (data.channel === 'email' && data.email?.toLowerCase() !== recipient) {
-        return response.badRequest({ message: 'Verify the same email address entered in your profile.' })
+      if (data.channel === 'email' && normalizedEmail !== recipient) {
+        return response.badRequest({ success: false, message: 'Verify the same email address entered in your profile.' })
       }
 
       const duplicate = data.channel === 'email'
         ? await User.findBy('email', recipient)
         : await User.findBy('phone', recipient)
       if (duplicate) {
-        return response.conflict({ message: 'An account with this verified contact already exists. Sign in instead.' })
+        return response.conflict({ success: false, message: 'An account with this verified contact already exists. Sign in instead.' })
       }
 
-      if (data.channel === 'phone' && data.email) {
-        const emailOwner = await User.findBy('email', data.email.toLowerCase())
+      if (data.channel !== 'email' && normalizedEmail) {
+        const emailOwner = await User.findBy('email', normalizedEmail)
         if (emailOwner) {
-          return response.conflict({ message: 'This email already belongs to another account.' })
+          return response.conflict({ success: false, message: 'This email already belongs to another account.' })
         }
       }
-      if (data.channel === 'email' && data.phone) {
-        const phoneOwner = await User.findBy('phone', data.phone)
+      if (data.channel === 'email' && normalizedProfilePhone) {
+        const phoneOwner = await User.findBy('phone', normalizedProfilePhone)
         if (phoneOwner) {
-          return response.conflict({ message: 'This phone number already belongs to another account.' })
+          return response.conflict({ success: false, message: 'This phone number already belongs to another account.' })
         }
       }
     } else {
-      const existing = data.channel === 'email'
+      existingUser = data.channel === 'email'
         ? await User.findBy('email', recipient)
         : await User.findBy('phone', recipient)
-      if (!existing) {
+      if (!existingUser) {
         return response.badRequest({
+          success: false,
           message: 'No IntellEdu account is registered with this email or phone number. Create an account first, then request a login OTP.',
         })
       }
@@ -143,48 +222,64 @@ export default class AuthOtpController {
 
     const now = DateTime.now()
     const windowStart = now.minus({ minutes: OTP_SEND_WINDOW_MINUTES })
-    await AuthOtpChallenge.query().where('created_at', '<', now.minus({ days: 1 }).toSQL()!).delete()
     const latest = await AuthOtpChallenge.query()
-      .where('channel', data.channel)
-      .where('recipient', recipient)
+      .where((query) => query
+        .where('recipient', recipient)
+        .orWhere('email', recipient)
+        .orWhere('phone', recipient))
       .orderBy('created_at', 'desc')
       .first()
 
     if (latest && latest.sentAt.plus({ seconds: OTP_RESEND_SECONDS }) > now) {
       const retryAfterSeconds = Math.ceil(latest.sentAt.plus({ seconds: OTP_RESEND_SECONDS }).diff(now, 'seconds').seconds)
       return response.status(429).send({
+        success: false,
         message: `Please wait ${retryAfterSeconds} seconds before requesting another code.`,
         retryAfterSeconds,
       })
     }
 
     const sentInWindow = await AuthOtpChallenge.query()
-      .where('channel', data.channel)
-      .where('recipient', recipient)
+      .where((query) => query
+        .where('recipient', recipient)
+        .orWhere('email', recipient)
+        .orWhere('phone', recipient))
       .where('created_at', '>', windowStart.toSQL()!)
       .count('* as total')
     const sends = Number(sentInWindow[0].$extras.total)
     if (sends >= OTP_SEND_LIMIT) {
       return response.status(429).send({
-        message: 'Too many codes were requested. Try again in 15 minutes.',
+        success: false,
+        message: 'Too many codes were requested for this contact. Try again in 10 minutes.',
       })
     }
 
-    const fast2smsKey = env.get('FAST2SMS_API_KEY')
-    const twilioAccountSid = env.get('TWILIO_ACCOUNT_SID')
-    const twilioAuthToken = env.get('TWILIO_AUTH_TOKEN')
-    const twilioFromNumber = env.get('TWILIO_FROM_NUMBER')
-    const emailProviderReady = hasEmailOtpSettings()
     let emailFallbackRecipient: string | null = null
     if (data.channel === 'whatsapp') {
       if (data.flow === 'signup') {
-        emailFallbackRecipient = data.email?.trim().toLowerCase() || null
-      } else {
-        const phoneAccount = await User.findBy('phone', recipient)
-        if (phoneAccount?.email && !phoneAccount.email.endsWith('@phone.intelledu.invalid')) {
-          emailFallbackRecipient = phoneAccount.email
-        }
+        emailFallbackRecipient = normalizedEmail
+      } else if (existingUser?.email && !existingUser.email.endsWith('@phone.intelledu.invalid')) {
+        emailFallbackRecipient = existingUser.email
       }
+    }
+
+    let whatsappService: typeof import('#services/whatsapp_service').whatsappService | null = null
+    let whatsappReady = false
+    if (data.channel === 'whatsapp' && env.get('WHATSAPP_ENABLED')?.toLowerCase() === 'true') {
+      try {
+        const service = await import('#services/whatsapp_service')
+        whatsappService = service.whatsappService
+        whatsappReady = whatsappService.isConnected()
+      } catch {
+        console.warn('[WhatsApp] Service unavailable; using email fallback when configured.')
+      }
+    }
+    if (data.channel === 'whatsapp' && !whatsappReady && !emailFallbackRecipient) {
+      return response.status(503).send({
+        success: false,
+        channel: null,
+        message: 'WhatsApp OTP is unavailable. Enter an email address for fallback or choose Email OTP.',
+      })
     }
 
     const challengeId = randomUUID()
@@ -202,114 +297,87 @@ export default class AuthOtpController {
       attempts: 0,
       fullName: data.flow === 'signup' ? data.fullName ?? null : null,
       email: data.flow === 'signup'
-        ? data.email?.toLowerCase() ?? (data.channel === 'email' ? recipient : null)
-        : null,
+        ? normalizedEmail ?? (data.channel === 'email' ? recipient : null)
+        : emailFallbackRecipient,
       phone: data.flow === 'signup'
-        ? data.phone ?? (data.channel === 'phone' ? recipient : null)
-        : null,
+        ? normalizedProfilePhone ?? (data.channel !== 'email' ? recipient : null)
+        : data.channel !== 'email' ? recipient : null,
       grade: data.flow === 'signup' ? data.grade ?? null : null,
+      emailFallback: false,
+      deliveryStatus: 'pending',
+      deliveryError: null,
     })
 
     let deliveryChannel: 'email' | 'phone' | 'whatsapp' = data.channel
-    let deliveryRecipient = recipient
     try {
       if (data.channel === 'email') {
-        if (!emailProviderReady) {
-          await challenge.delete()
-          return response.status(503).send({ message: 'Email OTP is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASS.' })
-        }
-        await sendEmailOtp(recipient, code)
+        await withDeliveryTimeout(sendOtpEmail(recipient, code))
       } else if (data.channel === 'whatsapp') {
-        let whatsappSent = false
-        if (env.get('WHATSAPP_ENABLED')?.toLowerCase() === 'true') {
-          try {
-            const { whatsappService } = await import('#services/whatsapp_service')
-            whatsappSent = await whatsappService.sendOtpMessage(recipient, code)
-          } catch {
-            console.warn('[WhatsApp] Service unavailable; trying email fallback.')
-          }
+        const deliveryTasks: Array<Promise<'whatsapp' | 'email'>> = []
+        if (whatsappReady && whatsappService) {
+          deliveryTasks.push(withDeliveryTimeout(whatsappService.sendOtpMessage(recipient, code).then((sent) => {
+            if (!sent) throw new Error('WhatsApp delivery is currently unavailable.')
+            return 'whatsapp' as const
+          })))
+        }
+        if (emailFallbackRecipient) {
+          deliveryTasks.push(withDeliveryTimeout(sendOtpEmail(emailFallbackRecipient, code).then(() => 'email' as const)))
         }
 
-        if (!whatsappSent) {
-          if (!emailFallbackRecipient || !emailProviderReady) {
-            await challenge.delete()
-            return response.status(503).send({
-              message: !emailFallbackRecipient
-                ? 'WhatsApp is unavailable and this account has no email address for OTP fallback.'
-                : 'WhatsApp is unavailable and email fallback is not configured. Configure SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASS.',
-              channels: { whatsapp: 'unavailable', email: emailProviderReady ? 'no-recipient' : 'not-configured' },
-            })
-          }
-          await sendEmailOtp(emailFallbackRecipient, code)
-          challenge.emailFallback = true
-          await challenge.save()
+        const outcomes = await Promise.allSettled(deliveryTasks)
+        const successfulChannels = outcomes.flatMap((outcome) =>
+          outcome.status === 'fulfilled' ? [outcome.value] : []
+        )
+        const whatsappSent = successfulChannels.includes('whatsapp')
+        if (!whatsappSent && !successfulChannels.includes('email')) {
+          const failure = outcomes.find(
+            (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
+          )
+          if (failure?.reason instanceof Error) throw failure.reason
+          throw new Error('Neither WhatsApp nor email could deliver this OTP.')
+        }
+
+        if (whatsappSent) {
+          deliveryChannel = 'whatsapp'
+        } else {
           deliveryChannel = 'email'
-          deliveryRecipient = emailFallbackRecipient
-          console.info('[OTP] WhatsApp unavailable; OTP sent using email fallback.')
+          challenge.emailFallback = true
         }
       } else {
-        if (fast2smsKey) {
-          const phoneDigits10 = recipient.replace(/^\+91/, '').replace(/\D/g, '').slice(-10)
-          const f2sResponse = await fetch('https://www.fast2sms.com/dev/bulkV2', {
-            method: 'POST',
-            headers: {
-              authorization: fast2smsKey,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-            body: JSON.stringify({
-              route: 'q',
-              message: `Your IntellEdu OTP is ${code}. Valid 60 sec. Do not share. -IntellEdu`,
-              language: 'english',
-              flash: 0,
-              numbers: phoneDigits10,
-            }),
-            signal: AbortSignal.timeout(15000),
-          })
-          const f2sBody = await f2sResponse.json() as { return?: boolean }
-          if (!f2sResponse.ok || !f2sBody.return) throw new Error('Phone OTP provider rejected the request.')
-        } else if (twilioAccountSid && twilioAuthToken && twilioFromNumber) {
-          const form = new URLSearchParams({
-            From: twilioFromNumber,
-            To: recipient,
-            Body: `Your IntellEdu OTP is ${code}. Valid 60 sec. Do not share. -IntellEdu`,
-          })
-          const smsResponse = await fetch(
-            `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(twilioAccountSid)}/Messages.json`,
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Basic ${Buffer.from(`${twilioAccountSid}:${twilioAuthToken}`).toString('base64')}`,
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              body: form,
-              signal: AbortSignal.timeout(15000),
-            }
-          )
-          if (!smsResponse.ok) throw new Error('Phone OTP provider rejected the request.')
-        } else {
-          await challenge.delete()
-          return response.status(503).send({ message: 'Phone OTP is not configured. Set FAST2SMS_API_KEY or the Twilio credentials.' })
-        }
+        await withDeliveryTimeout(sendSmsOtp(recipient, code))
       }
-    } catch {
-      await challenge.delete()
+
+      challenge.expiresAt = DateTime.now().plus({ seconds: OTP_LIFETIME_SECONDS })
+      challenge.deliveryStatus = 'sent'
+      challenge.deliveryError = null
+      await challenge.save()
+    } catch (error) {
+      const message = error instanceof EmailDeliveryError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : 'OTP delivery failed. Please retry in a moment.'
+      challenge.deliveryStatus = 'failed'
+      challenge.deliveryError = message
+      await challenge.save()
       console.warn(`[OTP] ${data.channel} delivery failed.`)
-      return response.status(502).send({
-        message: data.channel === 'whatsapp' && deliveryChannel !== 'email'
-          ? 'WhatsApp OTP could not be sent and email fallback was unavailable. Check the WhatsApp connection and SMTP settings.'
-          : `${deliveryChannel === 'email' ? 'Email' : 'Phone'} OTP could not be delivered. Check the provider configuration and try again.`,
+      const statusCode = error instanceof EmailDeliveryError ? error.statusCode : 502
+      return response.status(statusCode).send({
+        success: false,
+        channel: null,
+        message,
       })
     }
 
     return response.ok({
+      success: true,
       challengeId,
       channel: deliveryChannel,
       expiresInSeconds: OTP_LIFETIME_SECONDS,
       expiresAt: challenge.expiresAt.toISO()!,
       message: deliveryChannel === 'email' && data.channel === 'whatsapp'
-        ? `WhatsApp is unavailable. A 6-digit verification code was sent to your registered email address.`
-        : `A 6-digit verification code was sent to ${deliveryRecipient}. Please check your ${deliveryChannel === 'email' ? 'email inbox' : 'messages'} and enter the code.`,
+        ? 'WhatsApp is unavailable. A 6-digit OTP was sent via email.'
+        : `A 6-digit OTP was sent via ${deliveryChannel === 'whatsapp' ? 'WhatsApp' : deliveryChannel === 'email' ? 'email' : 'SMS'}.`,
     })
   }
 
@@ -327,6 +395,14 @@ export default class AuthOtpController {
 
     if (!challenge || challenge.consumedAt) {
       return response.badRequest({ message: 'This verification code is invalid or has already been used.' })
+    }
+    if (challenge.deliveryStatus === 'pending') {
+      return response.status(503).send({ message: 'OTP delivery is still processing. Wait a moment and try again.' })
+    }
+    if (challenge.deliveryStatus === 'failed') {
+      return response.status(502).send({
+        message: challenge.deliveryError || 'OTP delivery failed. Request a new code and try again.',
+      })
     }
     if (challenge.expiresAt.toMillis() <= DateTime.now().toMillis()) {
       return response.status(410).send({ message: 'This code expired. Request a new 6-digit code.' })

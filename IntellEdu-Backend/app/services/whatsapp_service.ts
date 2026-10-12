@@ -7,13 +7,17 @@ import env from '#start/env'
 
 class WhatsAppService {
   private socket: WASocket | null = null
-  private isConnected = false
+  private connected = false
   private isConnecting = false
   private latestQrDataUrl: string | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   isEnabled(): boolean {
     return env.get('WHATSAPP_ENABLED')?.toLowerCase() === 'true'
+  }
+
+  isConnected(): boolean {
+    return this.isEnabled() && this.connected
   }
 
   async init(): Promise<void> {
@@ -46,14 +50,14 @@ class WhatsAppService {
         }
 
         if (connection === 'open') {
-          this.isConnected = true
+          this.connected = true
           this.isConnecting = false
           this.latestQrDataUrl = null
           console.info('[WhatsApp] Connected.')
         }
 
         if (connection === 'close') {
-          this.isConnected = false
+          this.connected = false
           this.isConnecting = false
           this.socket = null
           const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode
@@ -84,14 +88,14 @@ class WhatsAppService {
 
   getStatus() {
     return {
-      isConnected: this.isConnected,
+      isConnected: this.connected,
       hasQr: !!this.latestQrDataUrl,
       qrDataUrl: this.latestQrDataUrl,
     }
   }
 
   async sendOtpMessage(phoneNumber: string, code: string): Promise<boolean> {
-    if (!this.isEnabled() || !this.isConnected || !this.socket) return false
+    if (!this.isEnabled() || !this.connected || !this.socket) return false
 
     try {
       const cleanDigits = phoneNumber.replace(/\D/g, '')

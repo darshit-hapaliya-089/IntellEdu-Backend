@@ -56,22 +56,24 @@ existing database exactly (including capitalization). After connecting to the
 database, run `node ace migration:run`.
 
 Copy `.env.example` to `.env` and set `GEMINI_API_KEY` and `FIREBASE_API_KEY` from
-the corresponding provider projects. Configure the Twilio
-SMS sender and Gmail App Password for OTP delivery. Keep all provider credentials in
-the backend environment; do not put them in frontend source code.
+the corresponding provider projects. Keep all provider credentials in the backend
+environment; do not put them in frontend source code.
 
 For phone OTP, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and the
-SMS-capable E.164 `TWILIO_FROM_NUMBER`. For email OTP, configure
-`SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, `SMTP_USER`, and `SMTP_PASS` using a
-Gmail App Password. These are separate delivery providers; both must be set up
-for users to choose either channel. On signup with both contacts entered, the user
-chooses one verification channel and only that contact is marked verified.
+SMS-capable E.164 `TWILIO_FROM_NUMBER` if SMS is needed. Production email uses
+Brevo: set `EMAIL_PROVIDER=brevo`, `BREVO_API_KEY`, `EMAIL_FROM` to a verified
+sender, and optionally `EMAIL_FROM_NAME`. Local development can use
+`EMAIL_PROVIDER=smtp` with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, and `SMTP_PASS`;
+SMTP is intentionally rejected in production. When WhatsApp is disabled or
+disconnected, the OTP endpoint uses email as a fallback if an email address is
+available. Set `WHATSAPP_ENABLED=true` only on a local machine with a linked
+WhatsApp session; Render's ephemeral filesystem should keep it disabled.
 
 In the separate frontend repository, copy `IntellEdu/.env.example` to
 `IntellEdu/.env.local` and fill in the Firebase Web app settings. Enable the Google
 provider in Firebase Authentication and authorize the frontend hostname in Firebase.
-Email and phone OTP are sent by the backend through Gmail SMTP and Twilio. Enable the
-Gemini Generative Language API in Google Cloud.
+Email and phone OTP are sent by the backend through Brevo and the configured SMS
+provider. Enable the Gemini Generative Language API in Google Cloud.
 
 ### 3. Run Migrations & Seed Database
 ```bash
@@ -81,6 +83,9 @@ node ace migration:run
 # Seed initial courses, quizzes, questions, and demo student profiles
 node ace db:seed
 ```
+This includes migration `13_add_otp_delivery_status_and_contact_indexes`, which
+adds delivery-state tracking and contact indexes. It does not rewrite existing
+phone-number records.
 
 ### 4. Start the Development Server
 ```bash
@@ -99,6 +104,7 @@ The API will be live at `http://localhost:3333` (API base: `http://localhost:333
 | `POST` | `/api/v1/auth/login` | Login & receive JWT | No |
 | `POST` | `/api/v1/auth/otp/send` | Send a six-digit signup/login code; expires after 60 seconds | No |
 | `POST` | `/api/v1/auth/otp/verify` | Verify the code and receive a JWT | No |
+| `GET` | `/health` | Lightweight uptime/cold-start health check | No |
 | `POST` | `/api/v1/auth/firebase` | Verify Firebase Google/phone identity and issue JWT | No |
 | `GET` | `/api/v1/auth/me` | Current user profile | Yes |
 | `POST` | `/api/v1/auth/logout` | Invalidate token | Yes |
