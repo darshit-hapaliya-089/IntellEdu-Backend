@@ -53,6 +53,9 @@ export default class User extends compose(BaseModel, AuthFinder) {
   declare streak: number
 
   @column()
+  declare longestStreak: number
+
+  @column()
   declare badge: string | null
 
   @column({ prepare: (v) => v?.toISODate?.() ?? v })

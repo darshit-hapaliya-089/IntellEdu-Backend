@@ -57,6 +57,13 @@ const appEnv = await Env.create(new URL('../', import.meta.url), {
   EMAIL_LOGO_URL: Env.schema.string.optional(),
   WHATSAPP_ENABLED: Env.schema.string.optional(),
   WHATSAPP_AUTH_DIR: Env.schema.string.optional(),
+  APP_TIMEZONE: Env.schema.string.optional(),
+  DAILY_QUIZ_COUNT: Env.schema.number.optional(),
+  // Cloudinary (for profile photo uploads)
+  CLOUDINARY_CLOUD_NAME: Env.schema.string.optional(),
+  CLOUDINARY_API_KEY: Env.schema.string.optional(),
+  CLOUDINARY_API_SECRET: Env.schema.string.optional(),
+  CLOUDINARY_UPLOAD_PRESET: Env.schema.string.optional(),
 })
 
 const port = appEnv.get('PORT') ?? 3333

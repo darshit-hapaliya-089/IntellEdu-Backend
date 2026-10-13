@@ -75,6 +75,8 @@ router.group(() => {
   */
   router.group(() => {
     router.get('/:id/stats', [UsersController, 'stats'])
+    router.post('/me/avatar', [UsersController, 'uploadAvatar']).use(middleware.auth())
+    router.delete('/me/avatar', [UsersController, 'removeAvatar']).use(middleware.auth())
   }).prefix('/users').use(middleware.auth())
 
   /*
@@ -118,6 +120,7 @@ router.group(() => {
   */
   router.group(() => {
     router.get('/',                 [QuizzesController, 'index'])
+    router.get('/daily',            [QuizzesController, 'daily']).use(middleware.auth())
     router.get('/my-results',       [QuizzesController, 'myResults']).use(middleware.auth())
     router.get('/:id',              [QuizzesController, 'show'])
     router.post('/:id/submit',      [QuizzesController, 'submit']).use(middleware.auth())
@@ -145,6 +148,7 @@ router.group(() => {
   */
   router.group(() => {
     router.get('/',              [ProgressController, 'myProgress'])
+    router.get('/overview',      [ProgressController, 'overview'])
     router.get('/streak',        [ProgressController, 'streak'])
     router.post('/streak/ping',  [ProgressController, 'pingStreak'])
   }).prefix('/progress').use(middleware.auth())

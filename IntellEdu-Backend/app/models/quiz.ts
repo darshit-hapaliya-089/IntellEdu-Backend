@@ -57,6 +57,15 @@ export default class Quiz extends BaseModel {
   declare subject: string | null
 
   @column()
+  declare slug: string | null
+
+  @column()
+  declare difficulty: 'easy' | 'medium' | 'hard'
+
+  @column()
+  declare iconKey: string | null
+
+  @column()
   declare xpReward: number
 
   @column()

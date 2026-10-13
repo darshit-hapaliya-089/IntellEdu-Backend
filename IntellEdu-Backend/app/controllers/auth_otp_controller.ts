@@ -5,6 +5,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js'
 import AuthOtpChallenge from '#models/auth_otp_challenge'
 import User from '#models/user'
 import { changeXp } from '#services/xp_service'
+import { recordDailyActivity } from '#services/streak_service'
 import { EmailDeliveryError, sendOtpEmail } from '#services/email_service'
 import env from '#start/env'
 import vine from '@vinejs/vine'
@@ -481,6 +482,9 @@ export default class AuthOtpController {
   }
 
   private async issueSession(user: User, response: HttpContext['response'], message: string) {
+    const streakRecord = await recordDailyActivity(user.id)
+    await user.refresh()
+
     const token = await User.accessTokens.create(user)
     return response.ok({
       message,
@@ -489,13 +493,22 @@ export default class AuthOtpController {
         id: user.id,
         fullName: user.fullName,
         email: user.email,
+        phone: user.phone,
         grade: user.grade,
         points: user.points,
         streak: user.streak,
+        currentStreak: user.streak,
+        longestStreak: user.longestStreak || user.streak,
+        lastActivityDate: streakRecord.lastActivityDate,
+        streakIncreasedToday: streakRecord.streakIncreasedToday,
         badge: user.badge,
         role: user.role,
         avatarUrl: user.avatarUrl,
       },
+      currentStreak: user.streak,
+      longestStreak: user.longestStreak || user.streak,
+      lastActivityDate: streakRecord.lastActivityDate,
+      streakIncreasedToday: streakRecord.streakIncreasedToday,
     })
   }
 }

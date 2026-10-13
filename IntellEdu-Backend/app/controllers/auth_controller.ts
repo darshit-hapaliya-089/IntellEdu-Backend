@@ -3,6 +3,7 @@ import { DateTime } from 'luxon'
 import { randomBytes } from 'node:crypto'
 import User from '#models/user'
 import { changeXp } from '#services/xp_service'
+import { recordDailyActivity, getTodayIstString } from '#services/streak_service'
 import hash from '@adonisjs/core/services/hash'
 import env from '#start/env'
 import vine from '@vinejs/vine'
@@ -201,6 +202,9 @@ export default class AuthController {
       user.points = initialXp.balance
     }
 
+    const streakRecord = await recordDailyActivity(user.id)
+    await user.refresh()
+
     const token = await User.accessTokens.create(user)
     return response.ok({
       message: data.mode === 'signup' ? 'Account created and phone verified.' : 'Phone verified. Login successful.',
@@ -209,13 +213,22 @@ export default class AuthController {
         id: user.id,
         fullName: user.fullName,
         email: user.email,
+        phone: user.phone,
         grade: user.grade,
         points: user.points,
         streak: user.streak,
+        currentStreak: user.streak,
+        longestStreak: user.longestStreak || user.streak,
+        lastActivityDate: streakRecord.lastActivityDate,
+        streakIncreasedToday: streakRecord.streakIncreasedToday,
         badge: user.badge,
         role: user.role,
         avatarUrl: user.avatarUrl,
       },
+      currentStreak: user.streak,
+      longestStreak: user.longestStreak || user.streak,
+      lastActivityDate: streakRecord.lastActivityDate,
+      streakIncreasedToday: streakRecord.streakIncreasedToday,
     })
   }
 
@@ -239,15 +252,9 @@ export default class AuthController {
       return response.forbidden({ message: 'Verify your email with the 6-digit OTP before signing in.' })
     }
 
-    // Update streak logic
-    const today = DateTime.now().toISODate()
-    const lastActive = user.lastActiveDate?.toISODate?.() ?? null
-
-    if (lastActive !== today) {
-      const yesterday = DateTime.now().minus({ days: 1 }).toISODate()
-      const newStreak  = lastActive === yesterday ? user.streak + 1 : 1
-      await user.merge({ streak: newStreak, lastActiveDate: DateTime.now() }).save()
-    }
+    // Record daily activity using Asia/Kolkata timezone
+    const streakRecord = await recordDailyActivity(user.id)
+    await user.refresh()
 
     const token = await User.accessTokens.create(user)
 
@@ -258,13 +265,22 @@ export default class AuthController {
         id:        user.id,
         fullName:  user.fullName,
         email:     user.email,
+        phone:     user.phone,
         grade:     user.grade,
         points:    user.points,
         streak:    user.streak,
+        currentStreak: user.streak,
+        longestStreak: user.longestStreak || user.streak,
+        lastActivityDate: streakRecord.lastActivityDate,
+        streakIncreasedToday: streakRecord.streakIncreasedToday,
         badge:     user.badge,
         role:      user.role,
         avatarUrl: user.avatarUrl,
       },
+      currentStreak: user.streak,
+      longestStreak: user.longestStreak || user.streak,
+      lastActivityDate: streakRecord.lastActivityDate,
+      streakIncreasedToday: streakRecord.streakIncreasedToday,
     })
   }
 
@@ -369,6 +385,9 @@ export default class AuthController {
       await user.save()
     }
 
+    const streakRecord = await recordDailyActivity(user.id)
+    await user.refresh()
+
     const token = await User.accessTokens.create(user)
     return response.ok({
       message: data.mode === 'signup' ? 'Account created successfully.' : 'Login successful.',
@@ -377,13 +396,22 @@ export default class AuthController {
         id: user.id,
         fullName: user.fullName,
         email: user.email,
+        phone: user.phone,
         grade: user.grade,
         points: user.points,
         streak: user.streak,
+        currentStreak: user.streak,
+        longestStreak: user.longestStreak || user.streak,
+        lastActivityDate: streakRecord.lastActivityDate,
+        streakIncreasedToday: streakRecord.streakIncreasedToday,
         badge: user.badge,
         role: user.role,
         avatarUrl: user.avatarUrl,
       },
+      currentStreak: user.streak,
+      longestStreak: user.longestStreak || user.streak,
+      lastActivityDate: streakRecord.lastActivityDate,
+      streakIncreasedToday: streakRecord.streakIncreasedToday,
     })
   }
 
@@ -407,6 +435,16 @@ export default class AuthController {
     const user = auth.getUserOrFail()
     await user.load('courses')
 
+    const today = getTodayIstString()
+    const lastActiveRaw = user.lastActiveDate
+    const lastActive = lastActiveRaw instanceof Date
+      ? lastActiveRaw.toISOString().slice(0, 10)
+      : lastActiveRaw
+        ? String(lastActiveRaw).slice(0, 10)
+        : null
+
+    const isActiveToday = lastActive === today
+
     return response.ok({
       user: {
         id:          user.id,
@@ -418,10 +456,20 @@ export default class AuthController {
         avatarUrl:   user.avatarUrl,
         points:      user.points,
         streak:      user.streak,
+        currentStreak: user.streak,
+        longestStreak: user.longestStreak || user.streak,
+        lastActivityDate: lastActive,
+        streakIncreasedToday: false,
+        isActiveToday,
         badge:       user.badge,
         coursesCount: user.courses?.length ?? 0,
         createdAt:   user.createdAt,
       },
+      currentStreak: user.streak,
+      longestStreak: user.longestStreak || user.streak,
+      lastActivityDate: lastActive,
+      streakIncreasedToday: false,
+      isActiveToday,
     })
   }
 

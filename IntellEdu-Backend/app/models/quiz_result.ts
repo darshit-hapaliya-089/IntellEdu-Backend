@@ -32,6 +32,12 @@ export default class QuizResult extends BaseModel {
   @column()
   declare timeTakenSeconds: number | null
 
+  @column({ prepare: (v) => v?.toISODate?.() ?? v })
+  declare quizDate: DateTime | string | null
+
+  @column.dateTime()
+  declare archivedAt: DateTime | null
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 
