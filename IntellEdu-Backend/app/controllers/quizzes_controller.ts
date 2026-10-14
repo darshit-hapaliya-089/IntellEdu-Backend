@@ -12,45 +12,112 @@ import vine from '@vinejs/vine'
 |--------------------------------------------------------------------------
 | QuizzesController
 |--------------------------------------------------------------------------
+| Handles daily quizzes (25 per day, Asia/Kolkata 00:00 rollover, no repeats),
+| practice bank (last 3 days only, 0 XP), quiz submission with single-attempt
+| daily XP, and today-scoped saved attempts.
 */
 export default class QuizzesController {
 
-  /** GET /api/v1/quizzes — All published practice quizzes */
-  async index({ request, response }: HttpContext) {
-    const query = Quiz.query()
-      .where('is_published', true)
-      .preload('course')
-      .orderBy('grade', 'asc')
-      .orderBy('subject', 'asc')
-      .orderBy('created_at', 'desc')
-    const grade = request.input('grade')
-    const subject = request.input('subject')
-    if (grade) {
-      const numericGrade = String(grade).match(/(?:class|grade)?\s*(\d{1,2})/i)?.[1]
-      query.whereRaw('LOWER(grade) = ?', [
-        numericGrade ? `class ${numericGrade}` : String(grade).toLowerCase(),
-      ])
+  /**
+   * GET /api/v1/quizzes — Recent Practice Quizzes
+   * Shows ONLY quizzes from the last 3 days of the grade that were already served,
+   * max 30, newest first. 0 XP awarded on practice.
+   */
+  async index({ auth, request, response }: HttpContext) {
+    let userGrade: string | undefined
+    try {
+      const user = auth.user
+      if (user) userGrade = user.grade
+    } catch {
+      // unauthenticated
     }
-    if (subject) query.whereRaw('LOWER(subject) = ?', [String(subject).toLowerCase()])
+
+    const gradeInput = request.input('grade') || userGrade || 'Class 10'
+    const normalized = normalizeGrade(gradeInput)
+    const today = getTodayIstString()
+    const subject = request.input('subject')
+    const search = request.input('search')
+
+    const threeDaysAgo = DateTime.now()
+      .setZone(getAppTimezone())
+      .minus({ days: 3 })
+      .toISODate()!
+
+    // Fetch quiz IDs from the last 3 days of daily pools (prior to today)
+    const recentDailyRows = await db
+      .from('daily_quizzes')
+      .where('grade', normalized)
+      .where('quiz_date', '>=', threeDaysAgo)
+      .where('quiz_date', '<', today)
+      .orderBy('quiz_date', 'desc')
+      .orderBy('slot_number', 'asc')
+      .select('quiz_id')
+
+    let practiceQuizIds = Array.from(new Set(recentDailyRows.map((r: any) => r.quiz_id)))
+
+    // Fallback: If no recent daily quizzes exist yet (e.g. freshly seeded bank),
+    // grab recent published quizzes for that grade as a seed bank up to 30
+    if (practiceQuizIds.length === 0) {
+      const fallbackRows = await Quiz.query()
+        .where('is_published', true)
+        .where('is_active', true)
+        .where((b) => {
+          b.where('grade', normalized).orWhereNull('grade')
+        })
+        .orderBy('created_at', 'desc')
+        .limit(30)
+        .select('id')
+      practiceQuizIds = fallbackRows.map((q) => q.id)
+    }
+
+    if (practiceQuizIds.length === 0) {
+      return response.ok({ quizzes: [] })
+    }
+
+    const query = Quiz.query()
+      .whereIn('id', practiceQuizIds)
+      .where('is_published', true)
+      .where('is_active', true)
+      .preload('course')
+      .limit(30)
+
+    if (subject && subject !== 'all') {
+      query.whereRaw('LOWER(subject) = ?', [String(subject).toLowerCase()])
+    }
+
+    if (search) {
+      const s = `%${String(search).toLowerCase().trim()}%`
+      query.where((b) => {
+        b.whereRaw('LOWER(title) LIKE ?', [s])
+          .orWhereRaw('LOWER(description) LIKE ?', [s])
+          .orWhereRaw('LOWER(subject) LIKE ?', [s])
+      })
+    }
+
     const quizzes = await query
     return response.ok({ quizzes })
   }
 
-  /** GET /api/v1/quizzes/daily — Today's daily quiz set for student's grade (changes at 00:00 IST) */
+  /**
+   * GET /api/v1/quizzes/daily — Today's 25 daily quizzes for student's grade
+   * Changes deterministically at 00:00 IST. Records in user_quiz_history.
+   */
   async daily({ auth, request, response }: HttpContext) {
     const user = auth.getUserOrFail()
     const targetGrade = request.input('grade') || user.grade || 'Class 10'
     const today = getTodayIstString()
     const resetsAt = getNextMidnightIstIso()
 
-    const dailyQuizzes = await getOrCreateDailyQuizzes(targetGrade, today)
+    const dailyQuizzes = await getOrCreateDailyQuizzes(targetGrade, today, user.id)
 
     // Load today's attempts for these quizzes by the current user
     const quizIds = dailyQuizzes.map((q) => q.id)
-    const todayAttempts = await QuizResult.query()
-      .where('user_id', user.id)
-      .whereIn('quiz_id', quizIds)
-      .where('quiz_date', today)
+    const todayAttempts = quizIds.length
+      ? await QuizResult.query()
+          .where('user_id', user.id)
+          .whereIn('quiz_id', quizIds)
+          .where('quiz_date', today)
+      : []
 
     const attemptsMap = new Map<number, { completedToday: boolean; bestScoreToday: number }>()
     for (const att of todayAttempts) {
@@ -81,10 +148,14 @@ export default class QuizzesController {
       }
     })
 
+    const completedCount = quizzesPayload.filter((q) => q.completedToday).length
+
     return response.ok({
       date: today,
       resetsAt,
       grade: normalizeGrade(targetGrade),
+      total: quizzesPayload.length,
+      completed: completedCount,
       quizzes: quizzesPayload,
     })
   }
@@ -101,39 +172,47 @@ export default class QuizzesController {
     // Strip correct_option before sending to client
     const safeQuiz = {
       ...quiz.serialize(),
-      questions: quiz.questions.map(q => ({
-        id:       q.id,
+      questions: quiz.questions.map((q) => ({
+        id: q.id,
         question: q.question,
-        options:  q.options,
-        // correctOption intentionally omitted
+        options: q.options,
       })),
     }
 
     return response.ok({ quiz: safeQuiz })
   }
 
-  /** GET /api/v1/quizzes/my-results — Last 7 days of attempts (IST date), newest first, paginated 20/page */
+  /**
+   * GET /api/v1/quizzes/my-results
+   * Shows ONLY attempts made on the current IST day when ?scope=today (default),
+   * starts completely empty after 00:00 IST. Supports ?scope=all for Progress & Stats.
+   */
   async myResults({ auth, request, response }: HttpContext) {
     const user = auth.getUserOrFail()
+    const scope = request.input('scope', 'today')
     const page = Number(request.input('page')) || 1
-    const limit = 20
+    const limit = Number(request.input('limit')) || 20
+    const today = getTodayIstString()
 
-    const sevenDaysAgo = DateTime.now()
-      .setZone(getAppTimezone())
-      .minus({ days: 7 })
-      .toISODate()!
+    // Lazy cleanup: archive attempts older than today IST
+    await db.rawQuery(
+      `UPDATE quiz_results 
+       SET archived_at = NOW() 
+       WHERE user_id = ? AND quiz_date < ? AND archived_at IS NULL`,
+      [user.id, today]
+    )
 
-    const resultsPagination = await QuizResult.query()
-      .where('user_id', user.id)
-      .where((b) => {
-        b.where('quiz_date', '>=', sevenDaysAgo)
-          .orWhere('created_at', '>=', DateTime.fromISO(sevenDaysAgo).startOf('day').toJSDate())
-      })
-      .preload('quiz')
-      .orderBy('created_at', 'desc')
-      .paginate(page, limit)
+    const query = QuizResult.query().where('user_id', user.id).preload('quiz').orderBy('created_at', 'desc')
+
+    if (scope === 'today') {
+      query.where('quiz_date', today)
+    }
+
+    const resultsPagination = await query.paginate(page, limit)
 
     return response.ok({
+      scope,
+      date: today,
       results: resultsPagination.all(),
       meta: resultsPagination.getMeta(),
     })
@@ -141,10 +220,12 @@ export default class QuizzesController {
 
   /** POST /api/v1/quizzes/:id/submit [Protected] */
   async submit({ auth, params, request, response }: HttpContext) {
-    const schema = vine.compile(vine.object({
-      answers:          vine.array(vine.number()),  // index of selected option per question
-      timeTakenSeconds: vine.number().optional(),
-    }))
+    const schema = vine.compile(
+      vine.object({
+        answers: vine.array(vine.number()),
+        timeTakenSeconds: vine.number().optional(),
+      })
+    )
 
     const { answers, timeTakenSeconds } = await request.validateUsing(schema)
 
@@ -157,9 +238,13 @@ export default class QuizzesController {
     if (quiz.questions.length === 0) {
       return response.badRequest({ message: 'This quiz does not have any questions yet.' })
     }
-    if (answers.length !== quiz.questions.length || answers.some((answer, index) =>
-      !Number.isInteger(answer) || answer < 0 || answer >= (quiz.questions[index]?.options.length ?? 0)
-    )) {
+    if (
+      answers.length !== quiz.questions.length ||
+      answers.some(
+        (answer, index) =>
+          !Number.isInteger(answer) || answer < 0 || answer >= (quiz.questions[index]?.options.length ?? 0)
+      )
+    ) {
       return response.badRequest({ message: 'Select one valid option for every quiz question.' })
     }
 
@@ -170,33 +255,54 @@ export default class QuizzesController {
     }
 
     const totalQuestions = quiz.questions.length
-    const accuracy       = Math.round((correct / totalQuestions) * 100)
-    const rawXpEarned    = Math.round((accuracy / 100) * quiz.xpReward)
+    const accuracy = Math.round((correct / totalQuestions) * 100)
+    const rawXpEarned = Math.round((accuracy / 100) * quiz.xpReward)
 
     const user = auth.getUserOrFail()
     const today = getTodayIstString()
+    const normalizedUserGrade = normalizeGrade(user.grade)
+
+    // Check if this quiz is in today's daily pool for the user's grade
+    const isDailyQuiz = await db
+      .from('daily_quizzes')
+      .where('quiz_date', today)
+      .where('quiz_id', quiz.id)
+      .where('grade', normalizedUserGrade)
+      .first()
 
     const transactionResult = await db.transaction(async (trx) => {
       await trx.from('users').where('id', user.id).forUpdate().first()
 
-      // XP is awarded on the first attempt of that quiz on that day only; repeating gives 0 XP
+      // XP Rule: Awarded only on the first attempt of a daily quiz on that day.
+      // Retakes of daily quizzes and practice quizzes award 0 XP.
+      let earned = 0
       const sourceKey = `daily-quiz-attempt:${user.id}:${quiz.id}:${today}`
-      const previouslyAwarded = await trx.from('xp_transactions')
-        .where('source_key', sourceKey)
-        .first()
-      const earned = previouslyAwarded || rawXpEarned < 1 ? 0 : rawXpEarned
 
-      const result = await QuizResult.create({
-        userId: user.id,
-        quizId: quiz.id,
-        score: correct,
-        totalQuestions,
-        correctAnswers: correct,
-        accuracy,
-        xpEarned: earned,
-        timeTakenSeconds: timeTakenSeconds ?? null,
-        quizDate: today,
-      }, { client: trx })
+      if (isDailyQuiz) {
+        const previouslyAwarded = await trx
+          .from('xp_transactions')
+          .where('source_key', sourceKey)
+          .first()
+
+        if (!previouslyAwarded && rawXpEarned > 0) {
+          earned = rawXpEarned
+        }
+      }
+
+      const result = await QuizResult.create(
+        {
+          userId: user.id,
+          quizId: quiz.id,
+          score: correct,
+          totalQuestions,
+          correctAnswers: correct,
+          accuracy,
+          xpEarned: earned,
+          timeTakenSeconds: timeTakenSeconds ?? null,
+          quizDate: today,
+        },
+        { client: trx }
+      )
 
       let balance = Number((await trx.from('users').select('points').where('id', user.id).first()).points)
       if (earned > 0) {
@@ -211,25 +317,32 @@ export default class QuizzesController {
 
       return { result, earned, balance }
     })
+
     const { result, earned, balance } = transactionResult
 
-    // Build answer explanations for review
+    // Build answer review explanations
     const review = quiz.questions.map((q, i) => ({
-      question:      q.question,
-      yourAnswer:    q.options[answers[i]] ?? 'No answer',
+      question: q.question,
+      yourAnswer: q.options[answers[i]] ?? 'No answer',
       correctAnswer: q.options[q.correctOption],
-      isCorrect:     answers[i] === q.correctOption,
-      explanation:   q.explanation,
+      isCorrect: answers[i] === q.correctOption,
+      explanation: q.explanation,
     }))
 
+    const msg = isDailyQuiz
+      ? earned > 0
+        ? `Quiz completed! You scored ${accuracy}% and earned +${earned} XP.`
+        : `Quiz completed with ${accuracy}%. (Daily XP already claimed on your first attempt).`
+      : `Practice quiz completed with ${accuracy}%. Practice quizzes award 0 XP.`
+
     return response.created({
-      message:         `Quiz completed! You scored ${accuracy}% and earned ${earned} XP.`,
-      score:           correct,
+      message: msg,
+      score: correct,
       totalQuestions,
       accuracy,
-      xpEarned:        earned,
+      xpEarned: earned,
       currentXpBalance: balance,
-      resultId:        result.id,
+      resultId: result.id,
       review,
     })
   }

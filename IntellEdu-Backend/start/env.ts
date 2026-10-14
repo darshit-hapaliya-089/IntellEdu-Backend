@@ -59,6 +59,8 @@ const appEnv = await Env.create(new URL('../', import.meta.url), {
   WHATSAPP_AUTH_DIR: Env.schema.string.optional(),
   APP_TIMEZONE: Env.schema.string.optional(),
   DAILY_QUIZ_COUNT: Env.schema.number.optional(),
+  QUIZ_BANK_MIN_UNUSED: Env.schema.number.optional(),
+  GEMINI_MODEL: Env.schema.string.optional(),
   // Cloudinary (for profile photo uploads)
   CLOUDINARY_CLOUD_NAME: Env.schema.string.optional(),
   CLOUDINARY_API_KEY: Env.schema.string.optional(),

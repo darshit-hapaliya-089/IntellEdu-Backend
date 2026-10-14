@@ -74,6 +74,15 @@ export default class Quiz extends BaseModel {
   @column()
   declare isPublished: boolean
 
+  @column()
+  declare isActive: boolean
+
+  @column()
+  declare source: 'seed' | 'ai'
+
+  @column()
+  declare reviewed: boolean
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 
