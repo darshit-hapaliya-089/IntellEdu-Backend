@@ -87,12 +87,21 @@ export async function recordDailyActivity(userId: number): Promise<DailyActivity
       longestStreak = currentStreak
     }
 
-    await trx.from('users').where('id', userId).update({
+    const freeStreakTarget = Number(env.get('AI_FREE_STREAK_DAYS')) || 10
+    const entersPaidMode = (longestStreak >= freeStreakTarget || currentStreak >= freeStreakTarget) && !userRow.ai_paid_mode_at
+
+    const updatePayload: Record<string, any> = {
       streak: currentStreak,
       longest_streak: longestStreak,
       last_active_date: today,
       updated_at: new Date(),
-    })
+    }
+
+    if (entersPaidMode) {
+      updatePayload.ai_paid_mode_at = new Date()
+    }
+
+    await trx.from('users').where('id', userId).update(updatePayload)
 
     // Check for streak milestone bonuses (3, 7, 14, 30 days)
     const milestoneXp = STREAK_MILESTONES[currentStreak]

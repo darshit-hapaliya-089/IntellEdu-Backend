@@ -4,42 +4,55 @@ import { DateTime } from 'luxon'
 import db from '@adonisjs/lucid/services/db'
 import DoubtSolverHistory from '#models/doubt_solver_history'
 import env from '#start/env'
-import { AI_QUESTION_XP_COST, changeXpInTransaction } from '#services/xp_service'
+import { changeXpInTransaction } from '#services/xp_service'
 import vine from '@vinejs/vine'
 
 interface GeminiResponse {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-  error?: { message?: string }
+  error?: { message?: string; code?: number; status?: string }
 }
 
-function toDateTime(value: unknown): DateTime | null {
-  if (!value) return null
-  if (value instanceof DateTime) return value
-  if (value instanceof Date) return DateTime.fromJSDate(value)
-  const parsed = DateTime.fromISO(String(value))
-  return parsed.isValid ? parsed : null
+export function getAiBillingConfig() {
+  const freeStreakTarget = Number(env.get('AI_FREE_STREAK_DAYS')) || 10
+  const costXp = Number(env.get('AI_ANSWER_XP_COST')) || 10
+  return { freeStreakTarget, costXp }
 }
 
-function trialDetails(firstUseValue: unknown, now = DateTime.now()) {
-  const startedAt = toDateTime(firstUseValue)
-  if (!startedAt) {
-    return {
-      trialActive: false,
-      trialDay: null,
-      trialStartedAt: null,
-      trialExpiresAt: null,
-      trialDaysRemaining: 10,
-    }
-  }
-  const expiresAt = startedAt.plus({ days: 10 })
-  const trialActive = now < expiresAt
-  const day = Math.floor(Math.max(0, now.diff(startedAt).as('days'))) + 1
+export function computeAiStatus(user: {
+  points: number | string
+  streak: number | string
+  longest_streak?: number | string
+  longestStreak?: number | string
+  ai_paid_mode_at?: Date | string | null
+  aiPaidModeAt?: Date | string | null
+}) {
+  const { freeStreakTarget, costXp } = getAiBillingConfig()
+  const streak = Number(user.streak || 0)
+  const longestStreak = Number(user.longest_streak ?? user.longestStreak ?? streak)
+  const paidModeAt = user.ai_paid_mode_at ?? user.aiPaidModeAt ?? null
+
+  const isPaid = Boolean(paidModeAt || longestStreak >= freeStreakTarget || streak >= freeStreakTarget)
+  const xpAvailable = Number(user.points || 0)
+
+  const mode: 'free' | 'paid' = isPaid ? 'paid' : 'free'
+  const daysToUnlockPaid = isPaid ? 0 : Math.max(0, freeStreakTarget - longestStreak)
+  const canAsk = isPaid ? xpAvailable >= costXp : true
+
   return {
-    trialActive,
-    trialDay: trialActive ? Math.min(day, 10) : 11,
-    trialStartedAt: startedAt.toISO(),
-    trialExpiresAt: expiresAt.toISO(),
-    trialDaysRemaining: trialActive ? Math.max(0, Math.ceil(expiresAt.diff(now).as('days'))) : 0,
+    mode,
+    streakDays: longestStreak,
+    freeStreakTarget,
+    daysToUnlockPaid,
+    costXp: isPaid ? costXp : 0,
+    xpAvailable,
+    canAsk,
+    // Legacy support for older clients
+    xpBalance: xpAvailable,
+    currentXpBalance: xpAvailable,
+    xpCostPerQuestion: isPaid ? costXp : 0,
+    trialActive: !isPaid,
+    trialDay: longestStreak,
+    trialDaysRemaining: daysToUnlockPaid,
   }
 }
 
@@ -48,16 +61,18 @@ export default class GeminiDoubtSolverController {
   async status({ auth, response }: HttpContext) {
     const user = auth.getUserOrFail()
     const account = await db.from('users')
-      .select('points', 'ai_first_used_at')
+      .select('points', 'streak', 'longest_streak', 'ai_paid_mode_at')
       .where('id', user.id)
       .first()
     if (!account) return response.notFound({ message: 'User not found.' })
 
+    const apiKey = env.get('GEMINI_API_KEY')
+    const aiAvailable = Boolean(apiKey && apiKey.trim().length > 0)
+
+    const computed = computeAiStatus(account)
     return response.ok({
-      xpBalance: Number(account.points),
-      currentXpBalance: Number(account.points),
-      xpCostPerQuestion: AI_QUESTION_XP_COST,
-      ...trialDetails(account.ai_first_used_at),
+      ...computed,
+      aiAvailable,
     })
   }
 
@@ -71,6 +86,8 @@ export default class GeminiDoubtSolverController {
     )
     const { question, subject } = await request.validateUsing(schema)
     const user = auth.getUserOrFail()
+
+    // 1. Idempotency Key Check
     const requestId = request.header('Idempotency-Key')?.trim() || null
     if (requestId && requestId.length > 100) {
       return response.badRequest({ message: 'Idempotency-Key must be 100 characters or fewer.' })
@@ -86,9 +103,10 @@ export default class GeminiDoubtSolverController {
           return response.conflict({ message: 'This Idempotency-Key was already used for a different question.' })
         }
         const account = await db.from('users')
-          .select('points', 'ai_first_used_at')
+          .select('points', 'streak', 'longest_streak', 'ai_paid_mode_at')
           .where('id', user.id)
           .first()
+        const computed = computeAiStatus(account || user)
         return response.ok({
           id: previous.id,
           question: previous.question,
@@ -96,55 +114,86 @@ export default class GeminiDoubtSolverController {
           subject: previous.subject,
           createdAt: previous.createdAt,
           xpCost: previous.xpCost,
-          xpBalance: Number(account.points),
-          currentXpBalance: Number(account.points),
-          ...trialDetails(account.ai_first_used_at),
+          ...computed,
         })
       }
     }
 
-    const apiKey = env.get('GEMINI_API_KEY')
-    if (!apiKey) {
-      return response.status(503).send({ message: 'Gemini AI is not configured.' })
-    }
+    // 2. Rate Limiting: 20 questions per user per hour
+    const oneHourAgo = DateTime.now().minus({ hours: 1 }).toJSDate()
+    const recentCountResult = await db.from('doubt_solver_history')
+      .where('user_id', user.id)
+      .where('created_at', '>=', oneHourAgo)
+      .count('* as total')
+    const recentCount = Number(recentCountResult[0]?.total ?? 0)
 
-    const access = await db.transaction(async (trx) => {
-      const account = await trx.from('users').where('id', user.id).forUpdate().first()
-      if (!account) return null
-      let firstUseAt = account.ai_first_used_at
-      if (!firstUseAt) {
-        firstUseAt = DateTime.now().toJSDate()
-        await trx.from('users').where('id', user.id).update({
-          ai_first_used_at: firstUseAt,
-          updated_at: firstUseAt,
-        })
-      }
-      return {
-        points: Number(account.points),
-        firstUseAt,
-        trial: trialDetails(firstUseAt),
-      }
-    })
-    if (!access) return response.notFound({ message: 'User not found.' })
-    if (!access.trial.trialActive && access.points < AI_QUESTION_XP_COST) {
-      return response.status(402).send({
-        message: `This AI question costs ${AI_QUESTION_XP_COST} XP. Earn more XP to continue.`,
-        requiredXp: AI_QUESTION_XP_COST,
-        availableXp: access.points,
-        xpBalance: access.points,
-        currentXpBalance: access.points,
-        ...access.trial,
+    if (recentCount >= 20) {
+      return response.status(429).send({
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'You have reached the limit of 20 questions per hour. Please take a break and try again later.',
       })
     }
 
+    // 3. User check, auto-paid-mode lock & pre-flight XP check
+    const { costXp, freeStreakTarget } = getAiBillingConfig()
+
+    const account = await db.transaction(async (trx) => {
+      const acc = await trx.from('users').where('id', user.id).forUpdate().first()
+      if (!acc) return null
+
+      // Check if user has reached paid threshold but ai_paid_mode_at is not recorded
+      const streak = Number(acc.streak || 0)
+      const longestStreak = Number(acc.longest_streak || 0)
+      if ((longestStreak >= freeStreakTarget || streak >= freeStreakTarget) && !acc.ai_paid_mode_at) {
+        const now = new Date()
+        await trx.from('users').where('id', user.id).update({
+          ai_paid_mode_at: now,
+          updated_at: now,
+        })
+        acc.ai_paid_mode_at = now
+      }
+      return acc
+    })
+
+    if (!account) return response.notFound({ message: 'User not found.' })
+
+    const computedStatus = computeAiStatus(account)
+    const isPaid = computedStatus.mode === 'paid'
+
+    // If paid and insufficient XP -> return 402 immediately without calling Gemini
+    if (isPaid && computedStatus.xpAvailable < costXp) {
+      return response.status(402).send({
+        code: 'INSUFFICIENT_XP',
+        required: costXp,
+        available: computedStatus.xpAvailable,
+        message: `You need ${costXp} XP to ask the AI. Solve quizzes to earn XP.`,
+        ...computedStatus,
+      })
+    }
+
+    // 4. Validate Gemini API Key
+    const apiKey = env.get('GEMINI_API_KEY')?.trim()
+    if (!apiKey) {
+      console.warn('[GeminiDoubtSolver] GEMINI_API_KEY is not configured.')
+      return response.status(503).send({
+        code: 'AI_UNAVAILABLE',
+        message: 'AI tutor is temporarily unavailable. You were not charged.',
+      })
+    }
+
+    // 5. Call Gemini API with 15s timeout
+    const model = env.get('GEMINI_MODEL') || 'gemini-2.5-flash'
     const endpoint = new URL(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
     )
     endpoint.searchParams.set('key', apiKey)
 
+    const abortController = new AbortController()
+    const timeoutHandle = setTimeout(() => abortController.abort(), 15000)
+
     let providerResponse: Response
     try {
-      providerResponse = await fetch(endpoint, {
+      providerResponse = await fetch(endpoint.toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -159,10 +208,48 @@ export default class GeminiDoubtSolverController {
           }],
           generationConfig: { temperature: 0.4, maxOutputTokens: 1024 },
         }),
-        signal: AbortSignal.timeout(20000),
+        signal: abortController.signal,
       })
-    } catch {
-      return response.status(502).send({ message: 'Gemini AI could not be reached.' })
+    } catch (fetchErr: any) {
+      if (fetchErr?.name === 'AbortError' || abortController.signal.aborted) {
+        console.warn('[GeminiDoubtSolver] Gemini request timed out after 15s.')
+        return response.status(504).send({
+          code: 'AI_TIMEOUT',
+          message: 'AI response timed out. Please try again. You were not charged.',
+        })
+      }
+      console.warn('[GeminiDoubtSolver] Network error reaching Gemini provider.')
+      return response.status(503).send({
+        code: 'AI_UNAVAILABLE',
+        message: 'AI tutor is temporarily unavailable. You were not charged.',
+      })
+    } finally {
+      clearTimeout(timeoutHandle)
+    }
+
+    if (!providerResponse.ok) {
+      const status = providerResponse.status
+      console.warn(`[GeminiDoubtSolver] Gemini API returned error status HTTP ${status}.`)
+
+      if (status === 400 || status === 401 || status === 403) {
+        // Invalid key, permission denied, or bad auth
+        return response.status(503).send({
+          code: 'AI_UNAVAILABLE',
+          message: 'AI tutor is temporarily unavailable. You were not charged.',
+        })
+      }
+
+      if (status === 429) {
+        return response.status(429).send({
+          code: 'AI_BUSY',
+          message: 'AI is busy, try again in a minute.',
+        })
+      }
+
+      return response.status(503).send({
+        code: 'AI_UNAVAILABLE',
+        message: 'AI tutor is temporarily unavailable. You were not charged.',
+      })
     }
 
     const providerData = (await providerResponse.json().catch(() => ({}))) as GeminiResponse
@@ -171,14 +258,19 @@ export default class GeminiDoubtSolverController {
       .join('')
       .trim()
 
-    if (!providerResponse.ok || !answer) {
-      return response.status(502).send({
-        message: providerData.error?.message || 'Gemini AI did not return an answer.',
+    if (!answer) {
+      console.warn('[GeminiDoubtSolver] Gemini returned empty answer text.')
+      return response.status(503).send({
+        code: 'AI_UNAVAILABLE',
+        message: 'AI tutor is temporarily unavailable. You were not charged.',
       })
     }
 
+    // 6. Gemini succeeded! Now atomically deduct XP (if paid) and store in history
     const saved = await db.transaction(async (trx) => {
-      const account = await trx.from('users').where('id', user.id).forUpdate().first()
+      const userAcc = await trx.from('users').where('id', user.id).forUpdate().first()
+
+      // Double-check idempotency key inside lock
       if (requestId) {
         const previous = await trx.from('doubt_solver_history')
           .where('user_id', user.id)
@@ -186,25 +278,32 @@ export default class GeminiDoubtSolverController {
           .first()
         if (previous) {
           if (previous.question !== question || previous.subject !== (subject || 'General')) {
-            return { conflict: true as const, balance: Number(account.points) }
+            return { conflict: true as const, balance: Number(userAcc.points) }
           }
-          return { record: previous, xpCost: Number(previous.xp_cost), balance: Number(account.points), duplicate: true as const }
+          return {
+            record: previous,
+            xpCost: Number(previous.xp_cost),
+            balance: Number(userAcc.points),
+            duplicate: true as const,
+          }
         }
       }
 
-      let xpCost = 0
-      let balance = Number(account.points)
-      if (!access.trial.trialActive) {
+      let deductedCost = 0
+      let balance = Number(userAcc.points)
+
+      if (isPaid) {
         const charge = await changeXpInTransaction(trx, {
           userId: user.id,
-          amount: -AI_QUESTION_XP_COST,
+          amount: -costXp,
           reason: 'ai_doubt_question',
-          sourceKey: `ai-question:${user.id}:${randomUUID()}`,
+          sourceKey: `ai-question:${user.id}:${requestId || randomUUID()}`,
         })
+
         if (!charge.awarded) {
           return { insufficient: true as const, balance: charge.balance }
         }
-        xpCost = AI_QUESTION_XP_COST
+        deductedCost = costXp
         balance = charge.balance
       }
 
@@ -213,28 +312,39 @@ export default class GeminiDoubtSolverController {
         question,
         answer,
         subject: subject || 'General',
-        xp_cost: xpCost,
+        xp_cost: deductedCost,
         client_request_id: requestId,
         created_at: DateTime.now().toJSDate(),
         updated_at: DateTime.now().toJSDate(),
       }).returning('id')
-      const record = await trx.from('doubt_solver_history').where('id', typeof id === 'number' ? id : id.id).first()
-      return { record, xpCost, balance, duplicate: false as const }
+
+      const record = await trx.from('doubt_solver_history')
+        .where('id', typeof id === 'number' ? id : id.id)
+        .first()
+
+      return { record, xpCost: deductedCost, balance, duplicate: false as const }
     })
 
     if ('conflict' in saved) {
       return response.conflict({ message: 'This Idempotency-Key was already used for a different question.' })
     }
+
     if ('insufficient' in saved) {
       return response.status(402).send({
-        message: `This AI question costs ${AI_QUESTION_XP_COST} XP. Earn more XP to continue.`,
-        requiredXp: AI_QUESTION_XP_COST,
-        availableXp: saved.balance,
+        code: 'INSUFFICIENT_XP',
+        required: costXp,
+        available: saved.balance,
+        message: `You need ${costXp} XP to ask the AI. Solve quizzes to earn XP.`,
+        xpAvailable: saved.balance,
         xpBalance: saved.balance,
         currentXpBalance: saved.balance,
-        ...trialDetails(access.firstUseAt),
       })
     }
+
+    const latestStatus = computeAiStatus({
+      ...account,
+      points: saved.balance,
+    })
 
     const body = {
       id: saved.record.id,
@@ -243,10 +353,9 @@ export default class GeminiDoubtSolverController {
       subject: saved.record.subject,
       createdAt: saved.record.created_at ?? saved.record.createdAt,
       xpCost: saved.xpCost,
-      xpBalance: saved.balance,
-      currentXpBalance: saved.balance,
-      ...access.trial,
+      ...latestStatus,
     }
+
     return saved.duplicate ? response.ok(body) : response.created(body)
   }
 

@@ -64,6 +64,9 @@ export default class User extends compose(BaseModel, AuthFinder) {
   @column.dateTime()
   declare aiFirstUsedAt: DateTime | null
 
+  @column.dateTime()
+  declare aiPaidModeAt: DateTime | null
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime
 

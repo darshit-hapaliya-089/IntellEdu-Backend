@@ -61,6 +61,8 @@ const appEnv = await Env.create(new URL('../', import.meta.url), {
   DAILY_QUIZ_COUNT: Env.schema.number.optional(),
   QUIZ_BANK_MIN_UNUSED: Env.schema.number.optional(),
   GEMINI_MODEL: Env.schema.string.optional(),
+  AI_FREE_STREAK_DAYS: Env.schema.number.optional(),
+  AI_ANSWER_XP_COST: Env.schema.number.optional(),
   // Cloudinary (for profile photo uploads)
   CLOUDINARY_CLOUD_NAME: Env.schema.string.optional(),
   CLOUDINARY_API_KEY: Env.schema.string.optional(),
